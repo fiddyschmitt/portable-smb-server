@@ -1,12 +1,7 @@
 # portable-smb-server
 
-A portable SMB server: a **single executable**, runs **without admin rights**,
-and has **no dependencies** (pure Go standard library — `go.mod` has zero
-`require` lines).
-
-The SMB2 protocol implementation is adapted from rclone's `serve smb`
-(itself a from-scratch, dependency-free SMB2 server), with the rclone VFS
-replaced by direct filesystem access and multi-share support added.
+A portable SMB server: a single executable, runs without admin rights,
+and has no dependencies.
 
 ## Features
 

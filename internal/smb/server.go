@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,15 +90,11 @@ func (s *Server) Addr() net.Addr {
 
 // Serve accepts and serves connections until Shutdown is called.
 func (s *Server) Serve() error {
-	host := hostOf(s.listener.Addr())
+	host := s.displayHost()
 	for _, sh := range s.shares {
 		logf("SMB server started on %s, share \\\\%s\\%s", s.listener.Addr(), host, sh.name)
 	}
-	if s.opt.User == "" {
-		logf("SMB: running with no authentication (guest access). Windows SMB clients " +
-			"will reject guest sessions (a guest session is unsigned and Windows requires signing); " +
-			"use -user and -pass for Windows clients. Linux and macOS clients can use guest.")
-	}
+	s.logConnectHelp()
 	var acceptDelay time.Duration
 	for {
 		nc, err := s.listener.Accept()
@@ -169,6 +166,40 @@ func (s *Server) Shutdown() error {
 	}
 	s.wg.Wait()
 	return err
+}
+
+// displayHost returns a host name clients can actually connect to: the bound
+// address, or the machine's hostname when bound to a wildcard address.
+func (s *Server) displayHost() string {
+	host := hostOf(s.listener.Addr())
+	if host == "0.0.0.0" || host == "::" {
+		if hn, err := os.Hostname(); err == nil {
+			return hn
+		}
+	}
+	return host
+}
+
+// logConnectHelp prints concise per-OS connection instructions for the first
+// share.
+func (s *Server) logConnectHelp() {
+	host, port := s.displayHost(), ""
+	if _, p, err := net.SplitHostPort(s.listener.Addr().String()); err == nil {
+		port = p
+	}
+	name := s.shares[0].name
+
+	logf("Connect from:")
+	if s.opt.User == "" {
+		logf("  Windows:  net use X: \\\\%s\\%s /TCPPORT:%s", host, name, port)
+		logf("            WARNING: Windows clients will likely reject guest connections (guest sessions cannot be signed and Windows requires signing) -- use -user and -pass instead")
+		logf("  Linux:    sudo mount -t cifs //%s/%s /mnt -o port=%s,vers=3.0,guest", host, name, port)
+		logf("  macOS:    smb://guest@%s:%s/%s", host, port, name)
+	} else {
+		logf("  Windows:  net use X: \\\\%s\\%s /TCPPORT:%s /USER:%s %s", host, name, port, s.opt.User, s.opt.Pass)
+		logf("  Linux:    sudo mount -t cifs //%s/%s /mnt -o port=%s,vers=3.0,username=%s,password=%s", host, name, port, s.opt.User, s.opt.Pass)
+		logf("  macOS:    smb://%s@%s:%s/%s", s.opt.User, host, port, name)
+	}
 }
 
 func (s *Server) nextSessionID() uint64 { return s.sessionCtr.Add(1) }

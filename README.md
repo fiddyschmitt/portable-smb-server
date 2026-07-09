@@ -10,9 +10,7 @@ Executables for Windows, Linux and Mac can be found over in the [releases](https
 ## Features
 
 - SMB dialects 2.0.2, 2.1, 3.0, 3.0.2
-- NTLMv2 authentication with message signing (HMAC-SHA256 on 2.x, AES-CMAC on
-  3.x), or guest access with `-guest`
-- Multiple shares
+- NTLMv2 authentication with message signing (HMAC-SHA256 on 2.x, AES-CMAC on 3.x), or guest access with `-guest`
 - Works with the native SMB clients on Windows, Linux (cifs) and macOS
 
 ## Usage
@@ -39,10 +37,7 @@ portable-smb-server -folder "D:\Temp" -share "temp" -folder "D:\Photos"
 ```
 
 exports `\\HOST\temp` and `\\HOST\Photos`. Unnamed folders default to their
-base name; if two unnamed folders share a base name they deconflict by
-flattening the path (`-folder D:\Temp -folder E:\Temp` becomes `d_temp` and
-`e_temp`). With no `-folder` at all, the current directory is exported as
-`data`.
+base name.
 
 The default port is 1445 rather than the standard 445 so the server can run
 without admin rights and without clashing with a system SMB service.
@@ -67,10 +62,6 @@ macOS (Finder → Go → Connect to Server):
 ```
 smb://user@HOST:1445/data
 ```
-
-Note: recent Windows clients reject guest (unauthenticated) sessions because
-they cannot be signed — use `-user`/`-pass` for Windows clients. Linux and
-macOS clients can use `-guest`.
 
 ## Building
 

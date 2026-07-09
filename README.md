@@ -76,7 +76,7 @@ macOS clients can use `-guest`.
 ## Building
 
 ```
-.\build.ps1        # win-x64 + linux-x64 into .\bin\
+.\build.ps1        # win-x64, linux-x64, linux-arm64, osx-x64, osx-arm64 into .\bin\
 go test ./...      # unit tests (protocol + backend)
 ```
 

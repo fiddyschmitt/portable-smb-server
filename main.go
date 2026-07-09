@@ -19,6 +19,9 @@ import (
 	"portable-smb-server/internal/smb"
 )
 
+// version is the semantic version of portable-smb-server. Update on release.
+const version = "0.1.0"
+
 // shareArg is one -folder occurrence, optionally named by a following -share.
 type shareArg struct {
 	folder string
@@ -63,12 +66,17 @@ func main() {
 		guest   = flag.Bool("guest", false, "allow unauthenticated guest access (ignores -user/-pass)")
 		logFile = flag.String("log", "", "also write the log to this file")
 		verbose = flag.Bool("v", false, "verbose (per-request) logging")
+		showVer = flag.Bool("version", false, "print the version and exit")
 	)
 	var args []shareArg
 	flag.Var(folderFlag{&args}, "folder", "folder to share; repeatable (default: current directory)")
 	flag.Var(shareNameFlag{&args}, "share", "share name for the preceding -folder (default: folder's base name)")
 	flag.Usage = usage
 	flag.Parse()
+	if *showVer {
+		fmt.Printf("portable-smb-server v%s\n", version)
+		return
+	}
 	if flag.NArg() > 0 {
 		fatalf("unexpected argument %q (folders are passed with -folder)", flag.Arg(0))
 	}
@@ -82,6 +90,7 @@ func main() {
 		log.SetOutput(io.MultiWriter(os.Stderr, f))
 	}
 	smb.SetDebug(*verbose)
+	log.Printf("portable-smb-server v%s", version)
 
 	if len(args) == 0 {
 		cwd, err := os.Getwd()
@@ -197,13 +206,13 @@ func flattenName(folder string) string {
 }
 
 func usage() {
-	fmt.Fprintf(flag.CommandLine.Output(), `portable-smb-server - a portable SMB server (single exe, no admin rights, no dependencies)
+	fmt.Fprintf(flag.CommandLine.Output(), `portable-smb-server v%s - a portable SMB server (single exe, no admin rights, no dependencies)
 
 Usage:
   %s [flags]
 
 Flags:
-`, filepath.Base(os.Args[0]))
+`, version, filepath.Base(os.Args[0]))
 	flag.PrintDefaults()
 	fmt.Fprint(flag.CommandLine.Output(), `
 Shares are passed as -folder/-share pairs; -share names the -folder before it

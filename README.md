@@ -3,6 +3,10 @@
 A portable SMB server: a single executable, runs without admin rights,
 and has no dependencies.
 
+## Download
+
+Executables for Windows, Linux and Mac can be found over in the [releases](https://github.com/fiddyschmitt/File-Tunnel/releases/latest) section.
+
 ## Features
 
 - SMB dialects 2.0.2, 2.1, 3.0, 3.0.2

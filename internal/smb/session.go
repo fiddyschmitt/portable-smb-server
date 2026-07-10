@@ -115,8 +115,8 @@ func (c *conn) maybeWarnWindowsGuest(token []byte) {
 		return
 	}
 	c.warnedWindowsGuest = true
-	logf("SMB: a Windows client connected as guest and will likely reject the "+
-		"session -- Windows requires SMB signing, which a guest session cannot provide. Use -user "+
+	logf("SMB: a Windows client connected as guest and will likely reject the " +
+		"session -- Windows requires SMB signing, which a guest session cannot provide. Use -user " +
 		"and -pass without -guest for Windows clients.")
 }
 

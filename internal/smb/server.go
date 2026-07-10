@@ -16,8 +16,9 @@ import (
 
 // share is one exported share: a name and the filesystem behind it.
 type share struct {
-	name string
-	fs   fsx.FileSystem
+	name     string
+	fs       fsx.FileSystem
+	readOnly bool
 }
 
 // Server is an SMB server exposing one or more shares.
@@ -60,7 +61,7 @@ func NewServer(opt Options) (*Server, error) {
 		if s.findShare(def.Name) != nil {
 			return nil, fmt.Errorf("smb: duplicate share name %q", def.Name)
 		}
-		s.shares = append(s.shares, &share{name: def.Name, fs: def.FS})
+		s.shares = append(s.shares, &share{name: def.Name, fs: def.FS, readOnly: def.ReadOnly})
 	}
 	if _, err := rand.Read(s.serverGUID[:]); err != nil {
 		return nil, err

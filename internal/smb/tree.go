@@ -37,13 +37,17 @@ func (c *conn) handleTreeConnect(h header, body []byte) (status uint32, treeID u
 	} else {
 		c.diskTrees[treeID] = sh
 	}
+	maximalAccess := uint32(0x001F01FF) // full access
+	if sh != nil && sh.readOnly {
+		maximalAccess = 0x001200A9 // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
+	}
 	rb := make([]byte, 16)
-	le.PutUint16(rb[0:2], 16)           // StructureSize
-	rb[2] = shareType                   // ShareType
-	rb[3] = 0                           // Reserved
-	le.PutUint32(rb[4:8], 0)            // ShareFlags
-	le.PutUint32(rb[8:12], 0)           // Capabilities
-	le.PutUint32(rb[12:16], 0x001F01FF) // MaximalAccess (full)
+	le.PutUint16(rb[0:2], 16)              // StructureSize
+	rb[2] = shareType                      // ShareType
+	rb[3] = 0                              // Reserved
+	le.PutUint32(rb[4:8], 0)               // ShareFlags
+	le.PutUint32(rb[8:12], 0)              // Capabilities
+	le.PutUint32(rb[12:16], maximalAccess) // MaximalAccess
 	return statusSuccess, treeID, rb
 }
 

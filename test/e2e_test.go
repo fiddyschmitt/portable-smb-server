@@ -19,21 +19,28 @@ import (
 	smb2 "github.com/cloudsoda/go-smb2"
 )
 
-var serverExe string
+var (
+	serverExe   string
+	providerExe string
+)
 
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "psmb-e2e")
 	if err != nil {
 		panic(err)
 	}
-	serverExe = filepath.Join(dir, "portable-smb-server")
+	exeSuffix := ""
 	if runtime.GOOS == "windows" {
-		serverExe += ".exe"
+		exeSuffix = ".exe"
 	}
-	build := exec.Command("go", "build", "-o", serverExe, ".")
-	build.Dir = ".."
-	if out, err := build.CombinedOutput(); err != nil {
-		panic(fmt.Sprintf("building server: %v\n%s", err, out))
+	serverExe = filepath.Join(dir, "portable-smb-server"+exeSuffix)
+	providerExe = filepath.Join(dir, "localvfs"+exeSuffix)
+	for target, out := range map[string]string{".": serverExe, "./examples/localvfs": providerExe} {
+		build := exec.Command("go", "build", "-o", out, target)
+		build.Dir = ".."
+		if bout, err := build.CombinedOutput(); err != nil {
+			panic(fmt.Sprintf("building %s: %v\n%s", target, err, bout))
+		}
 	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
@@ -68,17 +75,23 @@ func startServer(t *testing.T, args ...string) string {
 		_, _ = cmd.Process.Wait()
 	})
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	waitListening(t, addr)
+	return addr
+}
+
+// waitListening blocks until addr accepts TCP connections (or fails the test).
+func waitListening(t *testing.T, addr string) {
+	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		nc, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
 		if err == nil {
 			_ = nc.Close()
-			return addr
+			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("server did not start listening on %s", addr)
-	return ""
 }
 
 // dial connects with the given credentials and mounts the named share.

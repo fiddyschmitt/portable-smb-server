@@ -138,6 +138,17 @@ func (c *conn) handleCreate(h header, body []byte, treeID uint32) (uint32, []byt
 		}
 	}
 
+	// A read-only share refuses every open that would mutate: write access,
+	// truncation, creating a missing file or directory, or delete-on-close.
+	if sh.readOnly {
+		flags := accessToFlags(desiredAccess, createDisposition)
+		writes := flags&(os.O_RDWR|os.O_WRONLY|os.O_APPEND|os.O_TRUNC) != 0
+		creates := !exists && (flags&os.O_CREATE != 0 || createOptions&optDirectoryFile != 0)
+		if writes || creates || createOptions&optDeleteOnClose != 0 {
+			return statusMediaWriteProtected, errorResponseBody()
+		}
+	}
+
 	var of *openFile
 	var action uint32
 
@@ -163,6 +174,12 @@ func (c *conn) handleCreate(h header, body []byte, treeID uint32) (uint32, []byt
 		return statusNotADirectory, errorResponseBody()
 	default:
 		flags := accessToFlags(desiredAccess, createDisposition)
+		if sh.readOnly {
+			// The gate above proved this open mutates nothing; strip any
+			// leftover O_CREATE (e.g. FILE_OPEN_IF on an existing file) so a
+			// read-only backend never sees a create request.
+			flags = os.O_RDONLY
+		}
 		handle, err := sh.fs.OpenFile(path, flags, 0666)
 		if err != nil {
 			return mapOSError(err), errorResponseBody()
@@ -262,6 +279,10 @@ func mapOSError(err error) uint32 {
 		return statusObjectNameCollision
 	case errors.Is(err, os.ErrPermission):
 		return statusAccessDenied
+	case errors.Is(err, fsx.ErrReadOnly):
+		return statusMediaWriteProtected
+	case errors.Is(err, fsx.ErrNotEmpty):
+		return statusDirectoryNotEmpty
 	case errors.Is(err, os.ErrInvalid):
 		return statusInvalidParameter
 	default:

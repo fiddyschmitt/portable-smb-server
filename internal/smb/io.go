@@ -55,6 +55,9 @@ func (c *conn) handleWrite(h header, body []byte) (uint32, []byte) {
 	if of == nil || of.handle == nil {
 		return statusInvalidParameter, errorResponseBody()
 	}
+	if of.share.readOnly {
+		return statusMediaWriteProtected, errorResponseBody()
+	}
 	// length stays uint32 and is bounded before any int conversion so it cannot
 	// wrap negative and defeat the bounds check on 32-bit builds.
 	if length > maxIOSize || dataOffset < 0 || dataOffset+int(length) > len(body) {

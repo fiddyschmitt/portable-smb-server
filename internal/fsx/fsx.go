@@ -4,9 +4,19 @@
 package fsx
 
 import (
+	"errors"
 	"io"
 	"os"
 	"time"
+)
+
+// Sentinel errors a FileSystem can return so the SMB layer maps them to
+// precise NTSTATUS codes (beyond the portable os.Err* sentinels).
+var (
+	// ErrReadOnly marks a mutation attempted on a read-only filesystem.
+	ErrReadOnly = errors.New("filesystem is read-only")
+	// ErrNotEmpty marks removal of a non-empty directory.
+	ErrNotEmpty = errors.New("directory not empty")
 )
 
 // FileSystem is the filesystem behind one share. Paths are share-relative,

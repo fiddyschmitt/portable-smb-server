@@ -80,7 +80,7 @@ func (c *conn) handleQueryInfo(h header, body []byte) (uint32, []byte) {
 		case classFsSize:
 			info = fsSizeInfo(of.share.fs)
 		case classFsAttribute:
-			info = fsAttributeInfo()
+			info = fsAttributeInfo(of.share.readOnly)
 		case classFsVolume:
 			info = fsVolumeInfo(c.server.serverGUID, of.share.name)
 		case classFsDevice:
@@ -251,15 +251,24 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 	switch infoClass {
 	case classFileDisposition:
 		if len(buf) >= 1 {
+			if buf[0] != 0 && of.share.readOnly {
+				return statusMediaWriteProtected, errorResponseBody()
+			}
 			of.deleteOnClose = buf[0] != 0
 		}
 	case classFileEndOfFile:
 		if len(buf) >= 8 {
+			if of.share.readOnly {
+				return statusMediaWriteProtected, errorResponseBody()
+			}
 			if err := c.truncate(of, int64(le.Uint64(buf[0:8]))); err != nil {
 				return mapOSError(err), errorResponseBody()
 			}
 		}
 	case classFileRename:
+		if of.share.readOnly {
+			return statusMediaWriteProtected, errorResponseBody()
+		}
 		if len(buf) >= 20 {
 			replaceIfExists := buf[0] != 0
 			nameLen := le.Uint32(buf[16:20])
@@ -281,7 +290,12 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 	case classFileBasic:
 		if len(buf) >= 32 {
 			if lastWrite := le.Uint64(buf[16:24]); lastWrite != 0 {
-				_ = of.share.fs.Chtimes(of.path, filetimeToTime(lastWrite))
+				// A read-only share silently ignores the timestamp update (the
+				// only FileBasic field we act on) rather than failing the
+				// request: clients set it as post-write housekeeping.
+				if !of.share.readOnly {
+					_ = of.share.fs.Chtimes(of.path, filetimeToTime(lastWrite))
+				}
 			}
 		}
 	default:
@@ -423,11 +437,15 @@ func fsSizeInfo(f fsx.FileSystem) []byte {
 	return b
 }
 
-func fsAttributeInfo() []byte {
+func fsAttributeInfo(readOnly bool) []byte {
 	name := stringToUTF16le("psmb")
 	b := make([]byte, 12+len(name))
-	le.PutUint32(b[0:4], 0x00000002) // FILE_CASE_PRESERVED_NAMES
-	le.PutUint32(b[4:8], 255)        // MaximumComponentNameLength
+	attrs := uint32(0x00000002) // FILE_CASE_PRESERVED_NAMES
+	if readOnly {
+		attrs |= 0x00080000 // FILE_READ_ONLY_VOLUME
+	}
+	le.PutUint32(b[0:4], attrs)
+	le.PutUint32(b[4:8], 255) // MaximumComponentNameLength
 	le.PutUint32(b[8:12], uint32(len(name)))
 	copy(b[12:], name)
 	return b

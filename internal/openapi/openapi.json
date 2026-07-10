@@ -1,0 +1,233 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "portable-smb-server VFS provider API",
+    "version": "1.0.0",
+    "description": "Contract that an external program implements so portable-smb-server can expose it as an SMB share. portable-smb-server is the HTTP *client*; you implement this service.\n\nPaths are share-relative, forward-slash separated, with no leading slash; the empty string is the share root. All paths are passed URL-encoded in the `path` query parameter.\n\nEither side may enforce read-only: advertise `readOnly: true` from `/capabilities`, and/or run portable-smb-server with `-readonly`. A read-only provider may omit the write endpoints (or return 405/403); portable-smb-server will not call them once it sees `readOnly: true`.\n\n\"sub-file contents\" = the ranged `GET /read` endpoint: return just the requested byte window of a file, so large files never have to be fetched whole."
+  },
+  "paths": {
+    "/capabilities": {
+      "get": {
+        "summary": "Describe the provider",
+        "description": "Optional. If not implemented (404), portable-smb-server assumes a writable, case-sensitive VFS and derives the share name from the URL.",
+        "operationId": "capabilities",
+        "responses": {
+          "200": {
+            "description": "Provider capabilities",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Capabilities" } } }
+          }
+        }
+      }
+    },
+    "/stat": {
+      "get": {
+        "summary": "Stat a file or directory",
+        "operationId": "stat",
+        "parameters": [ { "$ref": "#/components/parameters/Path" } ],
+        "responses": {
+          "200": { "description": "File information", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FileInfo" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/list": {
+      "get": {
+        "summary": "List a directory",
+        "operationId": "list",
+        "parameters": [ { "$ref": "#/components/parameters/Path" } ],
+        "responses": {
+          "200": { "description": "Directory entries", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/DirEntries" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/read": {
+      "get": {
+        "summary": "Read a byte range of a file (sub-file contents)",
+        "description": "Return up to `length` bytes starting at `offset`. Fewer bytes (including zero) is fine at or past end-of-file. The body is the raw bytes.",
+        "operationId": "read",
+        "parameters": [
+          { "$ref": "#/components/parameters/Path" },
+          { "name": "offset", "in": "query", "required": true, "schema": { "type": "integer", "format": "int64", "minimum": 0 }, "description": "Byte offset to start reading at." },
+          { "name": "length", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 }, "description": "Maximum number of bytes to return." }
+        ],
+        "responses": {
+          "200": { "description": "The requested bytes (possibly fewer at EOF)", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/statfs": {
+      "get": {
+        "summary": "Report volume size",
+        "description": "Optional. If not implemented (404), portable-smb-server reports a large synthetic volume.",
+        "operationId": "statfs",
+        "responses": {
+          "200": { "description": "Volume size", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Statfs" } } } },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/create": {
+      "post": {
+        "summary": "Create an empty file",
+        "description": "Write endpoint. Omit on a read-only provider.",
+        "operationId": "create",
+        "parameters": [
+          { "$ref": "#/components/parameters/Path" },
+          { "name": "exclusive", "in": "query", "required": false, "schema": { "type": "boolean", "default": false }, "description": "If true, fail with 409 when the path already exists." }
+        ],
+        "responses": {
+          "200": { "description": "Created" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "403": { "$ref": "#/components/responses/ReadOnly" }
+        }
+      }
+    },
+    "/write": {
+      "put": {
+        "summary": "Write bytes at an offset",
+        "description": "Write endpoint. Omit on a read-only provider.",
+        "operationId": "write",
+        "parameters": [
+          { "$ref": "#/components/parameters/Path" },
+          { "name": "offset", "in": "query", "required": true, "schema": { "type": "integer", "format": "int64", "minimum": 0 } }
+        ],
+        "requestBody": { "required": true, "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+        "responses": {
+          "200": { "description": "Bytes written", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/WriteResult" } } } },
+          "403": { "$ref": "#/components/responses/ReadOnly" }
+        }
+      }
+    },
+    "/mkdir": {
+      "post": {
+        "summary": "Create a directory",
+        "operationId": "mkdir",
+        "parameters": [ { "$ref": "#/components/parameters/Path" } ],
+        "responses": {
+          "200": { "description": "Created" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "403": { "$ref": "#/components/responses/ReadOnly" }
+        }
+      }
+    },
+    "/rename": {
+      "post": {
+        "summary": "Rename/move a file or directory",
+        "operationId": "rename",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RenameRequest" } } } },
+        "responses": {
+          "200": { "description": "Renamed" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "403": { "$ref": "#/components/responses/ReadOnly" }
+        }
+      }
+    },
+    "/remove": {
+      "delete": {
+        "summary": "Delete a file or empty directory",
+        "operationId": "remove",
+        "parameters": [ { "$ref": "#/components/parameters/Path" } ],
+        "responses": {
+          "200": { "description": "Removed" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "description": "Directory not empty", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "403": { "$ref": "#/components/responses/ReadOnly" }
+        }
+      }
+    },
+    "/truncate": {
+      "post": {
+        "summary": "Set a file's size",
+        "operationId": "truncate",
+        "parameters": [
+          { "$ref": "#/components/parameters/Path" },
+          { "name": "size", "in": "query", "required": true, "schema": { "type": "integer", "format": "int64", "minimum": 0 } }
+        ],
+        "responses": {
+          "200": { "description": "Truncated" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "403": { "$ref": "#/components/responses/ReadOnly" }
+        }
+      }
+    },
+    "/chtimes": {
+      "post": {
+        "summary": "Set a file's modification time",
+        "operationId": "chtimes",
+        "parameters": [
+          { "$ref": "#/components/parameters/Path" },
+          { "name": "modTime", "in": "query", "required": true, "schema": { "type": "string", "format": "date-time" }, "description": "RFC3339 timestamp." }
+        ],
+        "responses": {
+          "200": { "description": "Updated" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "403": { "$ref": "#/components/responses/ReadOnly" }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "Path": { "name": "path", "in": "query", "required": true, "schema": { "type": "string" }, "description": "Share-relative path, forward-slash separated, no leading slash; empty string = share root." }
+    },
+    "responses": {
+      "NotFound": { "description": "Path does not exist", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Conflict": { "description": "Path already exists", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "ReadOnly": { "description": "The provider is read-only", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    },
+    "schemas": {
+      "Capabilities": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string", "description": "Suggested SMB share name, used when -share is omitted." },
+          "readOnly": { "type": "boolean", "default": false, "description": "If true, portable-smb-server exposes the share read-only and never calls write endpoints." },
+          "caseInsensitive": { "type": "boolean", "default": false, "description": "If true, name lookups are case-insensitive." }
+        }
+      },
+      "FileInfo": {
+        "type": "object",
+        "required": [ "name", "size", "isDir" ],
+        "properties": {
+          "name": { "type": "string", "description": "Base name (no path)." },
+          "size": { "type": "integer", "format": "int64", "description": "Size in bytes (0 for directories)." },
+          "modTime": { "type": "string", "format": "date-time", "description": "RFC3339 modification time; may be omitted or zero." },
+          "isDir": { "type": "boolean" }
+        }
+      },
+      "DirEntries": {
+        "type": "object",
+        "required": [ "entries" ],
+        "properties": { "entries": { "type": "array", "items": { "$ref": "#/components/schemas/FileInfo" } } }
+      },
+      "Statfs": {
+        "type": "object",
+        "required": [ "totalBytes", "freeBytes" ],
+        "properties": {
+          "totalBytes": { "type": "integer", "format": "int64" },
+          "freeBytes": { "type": "integer", "format": "int64" }
+        }
+      },
+      "WriteResult": {
+        "type": "object",
+        "required": [ "written" ],
+        "properties": { "written": { "type": "integer", "description": "Number of bytes written." } }
+      },
+      "RenameRequest": {
+        "type": "object",
+        "required": [ "from", "to" ],
+        "properties": {
+          "from": { "type": "string" },
+          "to": { "type": "string" },
+          "replace": { "type": "boolean", "default": false, "description": "If false, fail with 409 when the target exists." }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": { "error": { "type": "string" } }
+      }
+    }
+  }
+}

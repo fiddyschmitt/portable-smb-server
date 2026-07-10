@@ -4,8 +4,9 @@ import "portable-smb-server/internal/fsx"
 
 // ShareDef is one share to export: a name and the filesystem behind it.
 type ShareDef struct {
-	Name string
-	FS   fsx.FileSystem
+	Name     string
+	FS       fsx.FileSystem
+	ReadOnly bool // reject all mutations with STATUS_MEDIA_WRITE_PROTECTED
 }
 
 // Options configures the SMB server.

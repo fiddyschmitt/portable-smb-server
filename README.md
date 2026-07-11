@@ -5,7 +5,7 @@ and has no dependencies.
 
 ## Download
 
-Executables for Windows, Linux and Mac can be found over in the [releases](https://github.com/fiddyschmitt/File-Tunnel/releases/latest) section.
+Executables for Windows, Linux and Mac can be found over in the [releases](https://github.com/fiddyschmitt/portable-smb-server/releases/latest) section.
 
 ## Features
 

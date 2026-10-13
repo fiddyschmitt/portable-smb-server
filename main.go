@@ -23,7 +23,7 @@ import (
 )
 
 // version is the semantic version of portable-smb-server. Update on release.
-const version = "0.2.0"
+const version = "0.3.0"
 
 // shareArg is one -folder or -vfs occurrence, optionally named by a following
 // -share.
@@ -91,6 +91,8 @@ func main() {
 		showVer  = flag.Bool("version", false, "print the version and exit")
 		readOnly = flag.Bool("readonly", false, "expose every share read-only")
 		oapiAddr = flag.String("openapi", "", "also serve the VFS provider OpenAPI spec (Swagger UI) on this address, e.g. 127.0.0.1:8081")
+		vfsToken = flag.String("vfs-token", "", "sent as the X-Vfs-Token header on every request to a -vfs provider (a provider started with a token refuses requests without it)")
+		vfsAhead = flag.Int("vfs-readahead", httpvfs.DefaultReadAhead, "bytes fetched per /read from a -vfs provider when a client reads less, served to its following sequential reads (0 disables)")
 	)
 	var args []shareArg
 	flag.Var(folderFlag{&args}, "folder", "folder to share; repeatable (default: current directory)")
@@ -140,7 +142,7 @@ func main() {
 		if args[i].vfs == "" {
 			continue
 		}
-		f, err := httpvfs.New(args[i].vfs)
+		f, err := httpvfs.NewWithOptions(args[i].vfs, httpvfs.Options{Token: *vfsToken, ReadAhead: *vfsAhead})
 		if err != nil {
 			fatalf("%v", err)
 		}

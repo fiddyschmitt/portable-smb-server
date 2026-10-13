@@ -24,7 +24,11 @@ const maxReadChunk = 8 << 20
 type Options struct {
 	Name     string // suggested share name advertised via /capabilities
 	ReadOnly bool   // reject all write endpoints with 403
+	Token    string // when set, every request must carry it as X-Vfs-Token (401 otherwise)
 }
+
+// TokenHeader is the header a token-protected provider checks.
+const TokenHeader = "X-Vfs-Token"
 
 // Handler returns an http.Handler implementing the VFS provider contract on
 // top of a localfs root.
@@ -43,7 +47,16 @@ func Handler(f *localfs.FS, opt Options) http.Handler {
 	mux.HandleFunc("DELETE /remove", p.writeGate(p.remove))
 	mux.HandleFunc("POST /truncate", p.writeGate(p.truncate))
 	mux.HandleFunc("POST /chtimes", p.writeGate(p.chtimes))
-	return mux
+	if opt.Token == "" {
+		return mux
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(TokenHeader) != opt.Token {
+			writeErr(w, http.StatusUnauthorized, errors.New("missing or wrong "+TokenHeader))
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 type provider struct {
@@ -52,14 +65,17 @@ type provider struct {
 }
 
 type fileInfoJSON struct {
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"modTime"`
-	IsDir   bool      `json:"isDir"`
+	Name     string    `json:"name"`
+	Size     int64     `json:"size"`
+	ModTime  time.Time `json:"modTime"`
+	IsDir    bool      `json:"isDir"`
+	ReadOnly bool      `json:"readOnly,omitempty"`
 }
 
+// toJSON reports a file with no write bits (a read-only attribute on Windows,
+// a 0444 mode elsewhere) as readOnly, so the share shows it read-only too.
 func toJSON(fi os.FileInfo) fileInfoJSON {
-	return fileInfoJSON{Name: fi.Name(), Size: fi.Size(), ModTime: fi.ModTime(), IsDir: fi.IsDir()}
+	return fileInfoJSON{Name: fi.Name(), Size: fi.Size(), ModTime: fi.ModTime(), IsDir: fi.IsDir(), ReadOnly: !fi.IsDir() && fi.Mode().Perm()&0o222 == 0}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

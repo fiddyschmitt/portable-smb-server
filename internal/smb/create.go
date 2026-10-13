@@ -36,6 +36,7 @@ const (
 
 // File attribute flags ([MS-FSCC] 2.6).
 const (
+	fileAttrReadonly  uint32 = 0x00000001
 	fileAttrDirectory uint32 = 0x00000010
 	fileAttrNormal    uint32 = 0x00000080
 )
@@ -86,6 +87,20 @@ func (of *openFile) attrs() (attrs uint32, size int64, mtime time.Time) {
 		return fileAttrNormal, 0, time.Time{}
 	}
 	return fileInfoAttrs(fi), fi.Size(), fi.ModTime()
+}
+
+// fileIsReadOnly reports whether the backend marks a file read-only: no
+// write bits in its mode, which is how localfs reports a read-only attribute
+// and how httpvfs reports a provider's per-file readOnly. Directories never
+// count as read-only here.
+func fileIsReadOnly(fi os.FileInfo) bool {
+	return !fi.IsDir() && fi.Mode().Perm()&0o222 == 0
+}
+
+// readOnlyFile is fileIsReadOnly for the open's current state.
+func (of *openFile) readOnlyFile() bool {
+	fi, err := of.stat()
+	return err == nil && fileIsReadOnly(fi)
 }
 
 // name returns the base name of the open's path ("" for the share root).
@@ -146,6 +161,17 @@ func (c *conn) handleCreate(h header, body []byte, treeID uint32) (uint32, []byt
 		creates := !exists && (flags&os.O_CREATE != 0 || createOptions&optDirectoryFile != 0)
 		if writes || creates || createOptions&optDeleteOnClose != 0 {
 			return statusMediaWriteProtected, errorResponseBody()
+		}
+	}
+
+	// A file the backend reports read-only (a read-only attribute, a VFS
+	// provider's readOnly) refuses opens that would write to or delete it with
+	// STATUS_ACCESS_DENIED, as Windows does for its own read-only files; the
+	// share itself stays writable.
+	if exists && fileIsReadOnly(fi) {
+		flags := accessToFlags(desiredAccess, createDisposition)
+		if flags&(os.O_RDWR|os.O_WRONLY|os.O_APPEND|os.O_TRUNC) != 0 || createOptions&optDeleteOnClose != 0 {
+			return statusAccessDenied, errorResponseBody()
 		}
 	}
 

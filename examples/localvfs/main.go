@@ -26,6 +26,7 @@ func main() {
 		folder   = flag.String("folder", "", "folder to expose (default: current directory)")
 		name     = flag.String("name", "", "share name to suggest via /capabilities (default: folder's base name)")
 		readOnly = flag.Bool("readonly", false, "declare the provider read-only")
+		token    = flag.String("token", "", "require this value in the X-Vfs-Token header (portable-smb-server -vfs-token)")
 	)
 	flag.Parse()
 
@@ -51,5 +52,5 @@ func main() {
 	}
 	log.Printf("localvfs provider serving %s as %q on http://%s", f.Root(), shareName, ln.Addr())
 	log.Printf("connect it with: portable-smb-server -vfs http://%s", ln.Addr())
-	log.Fatal(http.Serve(ln, vfsprovider.Handler(f, vfsprovider.Options{Name: shareName, ReadOnly: *readOnly})))
+	log.Fatal(http.Serve(ln, vfsprovider.Handler(f, vfsprovider.Options{Name: shareName, ReadOnly: *readOnly, Token: *token})))
 }

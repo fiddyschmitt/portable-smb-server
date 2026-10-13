@@ -30,6 +30,8 @@ portable-smb-server [flags]
   -share NAME     share name for the preceding -folder or -vfs (default: folder base name / provider's suggestion)
   -readonly       expose every share read-only
   -openapi ADDR   also serve the VFS provider OpenAPI spec (Swagger UI) on this address
+  -vfs-token T    send T as the X-Vfs-Token header on every request to a -vfs provider
+  -vfs-readahead N  bytes fetched per /read from a -vfs provider when a client reads less (default 1048576; 0 disables)
   -log FILE       also write the log to this file
   -v              verbose (per-request) logging
 ```
@@ -71,7 +73,18 @@ The provider implements `GET /stat`, `GET /list` and `GET /read?offset&length`
 `GET /capabilities` to suggest a share name and declare `readOnly` /
 `caseInsensitive`. Read-only can be enforced from either side: the provider's
 `readOnly` capability, or `-readonly` on this server (clients see
-`STATUS_MEDIA_WRITE_PROTECTED` and a read-only volume).
+`STATUS_MEDIA_WRITE_PROTECTED` and a read-only volume). A provider can also
+mark single files `readOnly: true` in `/stat` and `/list` responses: they
+show up with `FILE_ATTRIBUTE_READONLY` and opens that would write to or
+delete them get `STATUS_ACCESS_DENIED`, without any write endpoint being
+called.
+
+Two flags shape the connection to a provider. `-vfs-token T` sends `T` as
+the `X-Vfs-Token` header on every request, so a provider on a local port can
+refuse anything that isn't this server (`examples/localvfs` and the reference
+provider accept a token). `-vfs-readahead N` (default 1 MiB) makes small
+sequential client reads cost one `/read` of `N` bytes instead of one request
+each: a 4 KiB application read loop becomes 256 reads per request.
 
 `examples/localvfs` is a complete reference provider (~100 lines of handler
 code) that serves a local folder over the contract:

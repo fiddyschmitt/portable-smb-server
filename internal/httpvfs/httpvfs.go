@@ -16,10 +16,30 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"portable-smb-server/internal/fsx"
 )
+
+// TokenHeader carries the shared secret a provider may require (-vfs-token).
+const TokenHeader = "X-Vfs-Token"
+
+// DefaultReadAhead is the window fetched per /read when a client reads in
+// smaller pieces: 256 sequential 4 KiB reads become one request.
+const DefaultReadAhead = 1 << 20
+
+// Options configures the connection to a provider.
+type Options struct {
+	// Token is sent as the X-Vfs-Token header on every request; a provider
+	// started with a token refuses requests without it.
+	Token string
+	// ReadAhead is the number of bytes fetched per /read when a client asks
+	// for fewer; the rest is kept per open file and served to the next
+	// sequential reads. 0 disables the window (every read is one request).
+	ReadAhead int
+}
 
 // FS is a filesystem backed by a VFS provider service.
 type FS struct {
@@ -28,6 +48,9 @@ type FS struct {
 	name            string // suggested share name from /capabilities ("" if none)
 	readOnly        bool
 	caseInsensitive bool
+	token           string
+	readAhead       int
+	gen             atomic.Uint64 // bumped by every mutation: read-ahead windows older than it are stale
 }
 
 // capabilities mirrors the /capabilities response.
@@ -39,25 +62,33 @@ type capabilities struct {
 
 // fileInfoJSON mirrors the FileInfo schema.
 type fileInfoJSON struct {
-	Name    string    `json:"name"`
-	Size    int64     `json:"size"`
-	ModTime time.Time `json:"modTime"`
-	IsDir   bool      `json:"isDir"`
+	Name     string    `json:"name"`
+	Size     int64     `json:"size"`
+	ModTime  time.Time `json:"modTime"`
+	IsDir    bool      `json:"isDir"`
+	ReadOnly bool      `json:"readOnly"`
 }
 
-// New connects to a provider at baseURL and queries its capabilities. A
-// provider that does not implement /capabilities (404) is assumed writable
-// and case-sensitive.
+// New connects to a provider at baseURL with the default options (no token,
+// 1 MiB read-ahead) and queries its capabilities. A provider that does not
+// implement /capabilities (404) is assumed writable and case-sensitive.
 func New(baseURL string) (*FS, error) {
+	return NewWithOptions(baseURL, Options{ReadAhead: DefaultReadAhead})
+}
+
+// NewWithOptions is New with a token and a read-ahead size.
+func NewWithOptions(baseURL string, opt Options) (*FS, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return nil, fmt.Errorf("invalid VFS provider URL %q (want http(s)://host[:port][/prefix])", baseURL)
 	}
 	f := &FS{
-		base:   strings.TrimRight(baseURL, "/"),
-		client: &http.Client{Timeout: 60 * time.Second},
+		base:      strings.TrimRight(baseURL, "/"),
+		client:    &http.Client{Timeout: 60 * time.Second},
+		token:     opt.Token,
+		readAhead: opt.ReadAhead,
 	}
-	resp, err := f.client.Get(f.base + "/capabilities")
+	resp, err := f.get(f.base + "/capabilities")
 	if err != nil {
 		return nil, fmt.Errorf("cannot reach VFS provider at %s: %w", baseURL, err)
 	}
@@ -73,6 +104,8 @@ func New(baseURL string) (*FS, error) {
 		f.caseInsensitive = caps.CaseInsensitive
 	case http.StatusNotFound:
 		// Optional endpoint: assume defaults.
+	case http.StatusUnauthorized:
+		return nil, fmt.Errorf("VFS provider %s requires a token (401): pass the same -vfs-token it was given", baseURL)
 	default:
 		return nil, fmt.Errorf("VFS provider %s: /capabilities returned %s", baseURL, resp.Status)
 	}
@@ -102,6 +135,26 @@ func (f *FS) endpointURL(endpoint, path string, extra url.Values) string {
 	return f.base + endpoint + "?" + q.Encode()
 }
 
+// newRequest builds a request carrying the token, when there is one.
+func (f *FS) newRequest(method, u string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequest(method, u, body)
+	if err != nil {
+		return nil, err
+	}
+	if f.token != "" {
+		req.Header.Set(TokenHeader, f.token)
+	}
+	return req, nil
+}
+
+func (f *FS) get(u string) (*http.Response, error) {
+	req, err := f.newRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	return f.client.Do(req)
+}
+
 // checkResp maps provider HTTP status codes onto the error sentinels the SMB
 // layer understands. notEmpty selects what a 409 means for this call.
 func checkResp(resp *http.Response, notEmpty bool) error {
@@ -122,6 +175,8 @@ func checkResp(resp *http.Response, notEmpty bool) error {
 	case http.StatusForbidden, http.StatusMethodNotAllowed, http.StatusNotImplemented:
 		// Providers may omit write endpoints entirely instead of returning 403.
 		sentinel = fsx.ErrReadOnly
+	case http.StatusUnauthorized:
+		sentinel = os.ErrPermission
 	case http.StatusBadRequest:
 		sentinel = os.ErrInvalid
 	default:
@@ -146,7 +201,7 @@ func readErrMsg(resp *http.Response) string {
 
 // do performs a request with no response body of interest.
 func (f *FS) do(method, u string, body io.Reader, notEmpty bool) error {
-	req, err := http.NewRequest(method, u, body)
+	req, err := f.newRequest(method, u, body)
 	if err != nil {
 		return err
 	}
@@ -167,7 +222,7 @@ func (f *FS) do(method, u string, body io.Reader, notEmpty bool) error {
 
 // getJSON performs a GET and decodes a JSON response into out.
 func (f *FS) getJSON(u string, out any) error {
-	resp, err := f.client.Get(u)
+	resp, err := f.get(u)
 	if err != nil {
 		return err
 	}
@@ -177,6 +232,9 @@ func (f *FS) getJSON(u string, out any) error {
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }
+
+// mutated marks every read-ahead window stale.
+func (f *FS) mutated() { f.gen.Add(1) }
 
 // --- fsx.FileSystem ---
 
@@ -201,6 +259,7 @@ func (f *FS) OpenFile(path string, flag int, perm os.FileMode) (fsx.File, error)
 		if err := f.do(http.MethodPost, f.endpointURL("/create", path, q), nil, false); err != nil {
 			return nil, err
 		}
+		f.mutated()
 	} else {
 		// Plain open: verify the path exists and is a file, mirroring
 		// os.OpenFile semantics.
@@ -242,7 +301,7 @@ func (f *FS) Rename(oldPath, newPath string) error {
 	// replace=true mirrors os.Rename; the SMB layer has already enforced the
 	// client's ReplaceIfExists choice before calling us.
 	body, _ := json.Marshal(map[string]any{"from": oldPath, "to": newPath, "replace": true})
-	req, err := http.NewRequest(http.MethodPost, f.base+"/rename", bytes.NewReader(body))
+	req, err := f.newRequest(http.MethodPost, f.base+"/rename", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -252,17 +311,29 @@ func (f *FS) Rename(oldPath, newPath string) error {
 		return err
 	}
 	defer resp.Body.Close()
-	return checkResp(resp, false)
+	if err := checkResp(resp, false); err != nil {
+		return err
+	}
+	f.mutated()
+	return nil
 }
 
 func (f *FS) Remove(path string) error {
-	return f.do(http.MethodDelete, f.endpointURL("/remove", path, nil), nil, true)
+	if err := f.do(http.MethodDelete, f.endpointURL("/remove", path, nil), nil, true); err != nil {
+		return err
+	}
+	f.mutated()
+	return nil
 }
 
 func (f *FS) Truncate(path string, size int64) error {
 	q := url.Values{}
 	q.Set("size", strconv.FormatInt(size, 10))
-	return f.do(http.MethodPost, f.endpointURL("/truncate", path, q), nil, false)
+	if err := f.do(http.MethodPost, f.endpointURL("/truncate", path, q), nil, false); err != nil {
+		return err
+	}
+	f.mutated()
+	return nil
 }
 
 func (f *FS) Chtimes(path string, mtime time.Time) error {
@@ -291,17 +362,57 @@ func (f *FS) CaseInsensitive() bool { return f.caseInsensitive }
 // --- file handle ---
 
 // file is an open handle on the provider. The provider is stateless (every
-// IO carries the path), so the handle is just the path.
+// IO carries the path), so the handle is the path plus a read-ahead window:
+// clients that read in small pieces (4 KiB application reads become 4 KiB SMB
+// READs) would otherwise cost one HTTP request each.
 type file struct {
 	fs   *FS
 	path string
+
+	mu     sync.Mutex
+	win    []byte // bytes [winOff, winOff+len(win)) of the file, as of winGen
+	winOff int64
+	winGen uint64
+	winEOF bool // the window ended at end-of-file
 }
 
 func (h *file) ReadAt(p []byte, off int64) (int, error) {
+	if h.fs.readAhead <= 0 || len(p) >= h.fs.readAhead {
+		return h.fetch(p, off)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	gen := h.fs.gen.Load()
+	if h.win != nil && h.winGen == gen && off >= h.winOff && off < h.winOff+int64(len(h.win)) {
+		n := copy(p, h.win[off-h.winOff:])
+		if n == len(p) {
+			return n, nil
+		}
+		if h.winEOF {
+			return n, io.EOF
+		}
+		// the request runs past the window: fetch a fresh one from here
+	}
+	buf := make([]byte, h.fs.readAhead)
+	n, err := h.fetch(buf, off)
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+	h.win, h.winOff, h.winGen, h.winEOF = buf[:n], off, gen, err == io.EOF
+	m := copy(p, h.win)
+	if m < len(p) {
+		// a short window means the file ended inside it (fetch returns io.EOF only then)
+		return m, io.EOF
+	}
+	return m, nil
+}
+
+// fetch is one /read request for exactly the bytes asked.
+func (h *file) fetch(p []byte, off int64) (int, error) {
 	q := url.Values{}
 	q.Set("offset", strconv.FormatInt(off, 10))
 	q.Set("length", strconv.Itoa(len(p)))
-	resp, err := h.fs.client.Get(h.fs.endpointURL("/read", h.path, q))
+	resp, err := h.fs.get(h.fs.endpointURL("/read", h.path, q))
 	if err != nil {
 		return 0, err
 	}
@@ -321,7 +432,7 @@ func (h *file) ReadAt(p []byte, off int64) (int, error) {
 func (h *file) WriteAt(p []byte, off int64) (int, error) {
 	q := url.Values{}
 	q.Set("offset", strconv.FormatInt(off, 10))
-	req, err := http.NewRequest(http.MethodPut, h.fs.endpointURL("/write", h.path, q), bytes.NewReader(p))
+	req, err := h.fs.newRequest(http.MethodPut, h.fs.endpointURL("/write", h.path, q), bytes.NewReader(p))
 	if err != nil {
 		return 0, err
 	}
@@ -334,6 +445,10 @@ func (h *file) WriteAt(p []byte, off int64) (int, error) {
 	if err := checkResp(resp, false); err != nil {
 		return 0, err
 	}
+	h.fs.mutated()
+	h.mu.Lock()
+	h.win = nil
+	h.mu.Unlock()
 	var out struct {
 		Written int `json:"written"`
 	}
@@ -357,9 +472,16 @@ type remoteInfo struct{ i fileInfoJSON }
 
 func (r remoteInfo) Name() string { return r.i.Name }
 func (r remoteInfo) Size() int64  { return r.i.Size }
+
+// Mode carries the provider's per-file readOnly as the absence of write
+// bits, which the SMB layer turns into FILE_ATTRIBUTE_READONLY and
+// STATUS_ACCESS_DENIED on writes.
 func (r remoteInfo) Mode() fs.FileMode {
 	if r.i.IsDir {
 		return fs.ModeDir | 0o777
+	}
+	if r.i.ReadOnly {
+		return 0o444
 	}
 	return 0o666
 }

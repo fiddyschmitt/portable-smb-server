@@ -3,8 +3,9 @@
   "info": {
     "title": "portable-smb-server VFS provider API",
     "version": "1.0.0",
-    "description": "Contract that an external program implements so portable-smb-server can expose it as an SMB share. portable-smb-server is the HTTP *client*; you implement this service.\n\nPaths are share-relative, forward-slash separated, with no leading slash; the empty string is the share root. All paths are passed URL-encoded in the `path` query parameter.\n\nEither side may enforce read-only: advertise `readOnly: true` from `/capabilities`, and/or run portable-smb-server with `-readonly`. A read-only provider may omit the write endpoints (or return 405/403); portable-smb-server will not call them once it sees `readOnly: true`.\n\n\"sub-file contents\" = the ranged `GET /read` endpoint: return just the requested byte window of a file, so large files never have to be fetched whole."
+    "description": "Contract that an external program implements so portable-smb-server can expose it as an SMB share. portable-smb-server is the HTTP *client*; you implement this service.\n\nPaths are share-relative, forward-slash separated, with no leading slash; the empty string is the share root. All paths are passed URL-encoded in the `path` query parameter.\n\nEither side may enforce read-only: advertise `readOnly: true` from `/capabilities`, and/or run portable-smb-server with `-readonly`. A read-only provider may omit the write endpoints (or return 405/403); portable-smb-server will not call them once it sees `readOnly: true`.\n\n\"sub-file contents\" = the ranged `GET /read` endpoint: return just the requested byte window of a file, so large files never have to be fetched whole.\n\nWhen portable-smb-server is started with `-vfs-token`, every request carries that value in the `X-Vfs-Token` header; a provider that requires a token answers 401 to anything else (the `vfsToken` security scheme). A provider that reads ahead on its own may ignore it: portable-smb-server already coalesces small sequential client reads into larger `/read` calls (`-vfs-readahead`, 1 MiB by default)."
   },
+  "security": [ {}, { "vfsToken": [] } ],
   "paths": {
     "/capabilities": {
       "get": {
@@ -170,6 +171,9 @@
     }
   },
   "components": {
+    "securitySchemes": {
+      "vfsToken": { "type": "apiKey", "in": "header", "name": "X-Vfs-Token", "description": "The value of portable-smb-server's -vfs-token flag." }
+    },
     "parameters": {
       "Path": { "name": "path", "in": "query", "required": true, "schema": { "type": "string" }, "description": "Share-relative path, forward-slash separated, no leading slash; empty string = share root." }
     },
@@ -194,7 +198,8 @@
           "name": { "type": "string", "description": "Base name (no path)." },
           "size": { "type": "integer", "format": "int64", "description": "Size in bytes (0 for directories)." },
           "modTime": { "type": "string", "format": "date-time", "description": "RFC3339 modification time; may be omitted or zero." },
-          "isDir": { "type": "boolean" }
+          "isDir": { "type": "boolean" },
+          "readOnly": { "type": "boolean", "default": false, "description": "The file cannot be written through this provider (a read-only attribute, a read-only policy for that path). portable-smb-server shows it with FILE_ATTRIBUTE_READONLY and refuses opens for writing or deleting with STATUS_ACCESS_DENIED, without calling a write endpoint. Directories ignore it." }
         }
       },
       "DirEntries": {

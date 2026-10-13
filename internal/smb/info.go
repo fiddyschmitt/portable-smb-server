@@ -254,12 +254,18 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 			if buf[0] != 0 && of.share.readOnly {
 				return statusMediaWriteProtected, errorResponseBody()
 			}
+			if buf[0] != 0 && of.readOnlyFile() {
+				return statusAccessDenied, errorResponseBody()
+			}
 			of.deleteOnClose = buf[0] != 0
 		}
 	case classFileEndOfFile:
 		if len(buf) >= 8 {
 			if of.share.readOnly {
 				return statusMediaWriteProtected, errorResponseBody()
+			}
+			if of.readOnlyFile() {
+				return statusAccessDenied, errorResponseBody()
 			}
 			if err := c.truncate(of, int64(le.Uint64(buf[0:8]))); err != nil {
 				return mapOSError(err), errorResponseBody()
@@ -268,6 +274,9 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 	case classFileRename:
 		if of.share.readOnly {
 			return statusMediaWriteProtected, errorResponseBody()
+		}
+		if of.readOnlyFile() {
+			return statusAccessDenied, errorResponseBody()
 		}
 		if len(buf) >= 20 {
 			replaceIfExists := buf[0] != 0
@@ -293,7 +302,7 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 				// A read-only share silently ignores the timestamp update (the
 				// only FileBasic field we act on) rather than failing the
 				// request: clients set it as post-write housekeeping.
-				if !of.share.readOnly {
+				if !of.share.readOnly && !of.readOnlyFile() {
 					_ = of.share.fs.Chtimes(of.path, filetimeToTime(lastWrite))
 				}
 			}
@@ -551,6 +560,9 @@ func buildDirInfoBuffer(entries []os.FileInfo, maxLen int, class byte, of *openF
 func fileInfoAttrs(fi os.FileInfo) uint32 {
 	if fi.IsDir() {
 		return fileAttrDirectory
+	}
+	if fileIsReadOnly(fi) {
+		return fileAttrReadonly
 	}
 	return fileAttrNormal
 }

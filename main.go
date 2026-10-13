@@ -93,6 +93,7 @@ func main() {
 		oapiAddr = flag.String("openapi", "", "also serve the VFS provider OpenAPI spec (Swagger UI) on this address, e.g. 127.0.0.1:8081")
 		vfsToken = flag.String("vfs-token", "", "sent as the X-Vfs-Token header on every request to a -vfs provider (a provider started with a token refuses requests without it)")
 		vfsAhead = flag.Int("vfs-readahead", httpvfs.DefaultReadAhead, "bytes fetched per /read from a -vfs provider when a client reads less, served to its following sequential reads (0 disables)")
+		withPar  = flag.Bool("exit-with-parent", false, "exit when the process that started this one is gone (for supervisors that may die abruptly)")
 	)
 	var args []shareArg
 	flag.Var(folderFlag{&args}, "folder", "folder to share; repeatable (default: current directory)")
@@ -118,6 +119,9 @@ func main() {
 	}
 	smb.SetDebug(*verbose)
 	log.Printf("portable-smb-server v%s", version)
+	if *withPar {
+		watchParent()
+	}
 
 	if *oapiAddr != "" {
 		go func() {

@@ -13,7 +13,7 @@ Executables for Windows, Linux and Mac can be found over in the [releases](https
 - NTLMv2 authentication with message signing (HMAC-SHA256 on 2.x, AES-CMAC on 3.x), or guest access with `-guest`
 - Multiple shares, each backed by a local folder (`-folder`) or an external VFS provider service (`-vfs`, see below)
 - Read-only shares (`-readonly`, or declared by the provider)
-- Works with the native SMB clients on Windows, Linux (cifs) and macOS
+- Works with the native SMB clients on Windows, Linux (cifs) and macOS; answers Apple's SMB2 extensions (the `AAPL` create context with ReadDirAttr), and a lookup by name costs one stat, so macOS, which looks every entry of a folder up one at a time, lists a 5,000-file folder in seconds (on a par with Samba)
 
 ## Usage
 
@@ -123,8 +123,22 @@ go test ./...      # unit tests (protocol + backend)
 ```
 
 The e2e tests live in a separate Go module (`test/`) so the product module
-stays dependency-free; they drive the server with a real SMB2 client:
+stays dependency-free; they drive the server with a real SMB2 client, including a
+5,000-entry folder listed and looked up by name and eight sessions reading one
+file at once:
 
 ```
 cd test; go test
+```
+
+The Go client cannot stand in for macOS's own, which negotiates Apple's
+extensions and resolves every entry of a folder by name. `test/mac/mac-client-check.sh`
+runs on a Mac against any instance and times the native client (`mount_smbfs`)
+listing a big folder with and without attributes, reads a file and does a write
+round trip; it fails if the big folder takes more than a few seconds. On the lab's
+LAN a 5,000-file folder lists in about 8 s both ways; Samba without `vfs_fruit`
+takes 10 s for the names and 48 s with attributes from the same Mac.
+
+```
+test/mac/mac-client-check.sh HOST 1445 data user password many
 ```

@@ -129,6 +129,20 @@ func (c *conn) handleQueryDirectory(h header, body []byte) (uint32, []byte) {
 		of.dirEntries = nil
 		of.dirPos = 0
 	}
+	if !of.dirLoaded && singleName(pattern) {
+		// A lookup by name: macOS resolves every entry this way, even just after enumerating the folder
+		// (a compound CREATE of the parent, QUERY_DIRECTORY with the name as the pattern, CLOSE), and
+		// Windows does it for path resolution. One stat answers it; listing the whole folder and
+		// filtering, as a wildcard pattern needs, made each lookup cost the folder's size: a 5,000-file
+		// folder took macOS minutes over a LAN. The entry carries the name as the client spelt it.
+		debugf("SMB: QUERY_DIRECTORY %q class=%#x flags=%#x name=%q", of.path, infoClass, flags, pattern)
+		of.dirEntries = nil
+		if fi, err := of.share.fs.Stat(joinPath(of.path, pattern)); err == nil {
+			of.dirEntries = []os.FileInfo{fi}
+		}
+		of.dirPos = 0
+		of.dirLoaded = true
+	}
 	if !of.dirLoaded {
 		entries, err := c.listDir(of.share, of.path)
 		if err != nil {
@@ -140,7 +154,8 @@ func (c *conn) handleQueryDirectory(h header, body []byte) (uint32, []byte) {
 			logf("SMB: cannot list %q, reporting it empty: %v", of.path, err)
 			entries = nil
 		}
-		of.dirEntries = filterByPattern(entries, pattern, of.share.fs.CaseInsensitive())
+		debugf("SMB: QUERY_DIRECTORY %q class=%#x flags=%#x pattern=%q entries=%d", of.path, infoClass, flags, pattern, len(entries))
+	of.dirEntries = filterByPattern(entries, pattern, of.share.fs.CaseInsensitive())
 		of.dirPos = 0
 		of.dirLoaded = true
 	}
@@ -157,12 +172,18 @@ func (c *conn) handleQueryDirectory(h header, body []byte) (uint32, []byte) {
 	if flags&flagReturnSingleEntry != 0 && len(entries) > 1 {
 		entries = entries[:1]
 	}
-	buf, n := buildDirInfoBuffer(entries, outputBufferLength, infoClass, of)
+	buf, n := buildDirInfoBuffer(entries, outputBufferLength, infoClass, of, c.aapl)
 	if n == 0 {
 		return statusNoMoreFiles, errorResponseBody()
 	}
 	of.dirPos += n
 	return statusSuccess, infoResponseBody(buf)
+}
+
+// singleName reports whether an SMB2 search pattern names exactly one entry:
+// not empty and without the '*' and '?' wildcards or their legacy DOS forms.
+func singleName(pattern string) bool {
+	return pattern != "" && !strings.ContainsAny(pattern, `*?<>"`)
 }
 
 // filterByPattern returns the directory entries whose name matches an SMB2
@@ -509,7 +530,7 @@ func dirInfoLayout(class byte) (fixed, nameOff int, ok bool) {
 // maxLen bytes. It returns the buffer and the number of entries encoded (always
 // at least one, to guarantee progress). of is the directory being enumerated;
 // it provides the share and parent path for the entries' FileIds.
-func buildDirInfoBuffer(entries []os.FileInfo, maxLen int, class byte, of *openFile) ([]byte, int) {
+func buildDirInfoBuffer(entries []os.FileInfo, maxLen int, class byte, of *openFile, aapl bool) ([]byte, int) {
 	fixed, nameOff, ok := dirInfoLayout(class)
 	if !ok {
 		fixed, nameOff = 64, 64 // default to FileDirectoryInformation
@@ -544,6 +565,11 @@ func buildDirInfoBuffer(entries []os.FileInfo, maxLen int, class byte, of *openF
 				le.PutUint64(e[72:80], pathFileID(of.share.name, joinPath(of.path, fi.Name())))
 			case 0x25: // FileId at offset 96
 				le.PutUint64(e[96:104], pathFileID(of.share.name, joinPath(of.path, fi.Name())))
+				if aapl {
+					// a macOS client that negotiated ReadDirAttr reads max access, fork size and Finder
+					// info from the entry instead of looking each file up (aapl.go)
+					appleReadDirAttr(e, of.share.readOnly || fileIsReadOnly(fi), fi.IsDir())
+				}
 			}
 		}
 		copy(e[nameOff:], nameBytes)

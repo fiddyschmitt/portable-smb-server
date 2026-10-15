@@ -226,7 +226,7 @@ func (c *conn) handleCreate(h header, body []byte, treeID uint32) (uint32, []byt
 	}
 	of.fileID = c.newFileID()
 	c.addHandle(of)
-	return statusSuccess, c.buildCreateResp(action, of)
+	return statusSuccess, c.withAppleContext(body, sh, c.buildCreateResp(action, of))
 }
 
 // buildCreateResp builds the CREATE response body ([MS-SMB2] 2.2.14).

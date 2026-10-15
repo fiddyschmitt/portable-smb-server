@@ -225,6 +225,7 @@ type conn struct {
 	authChallenge      [8]byte             // NTLM server challenge for the in-progress session setup
 	signKey            []byte              // message signing key (nil for guest/unsigned sessions)
 	warnedWindowsGuest bool                // a Windows-client-as-guest warning was already logged
+	aapl               bool                // the client negotiated Apple's ReadDirAttr (aapl.go): directory entries carry its layout
 	authedSessions     map[uint64]struct{} // SessionIds that completed authentication (only enforced when opt.User != "")
 	pipeTrees          map[uint32]struct{} // TreeIds of IPC$ (named-pipe) shares; file opens on them are rejected
 	diskTrees          map[uint32]*share   // TreeIds of connected disk shares

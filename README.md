@@ -131,13 +131,27 @@ file at once:
 cd test; go test
 ```
 
-The Go client cannot stand in for macOS's own, which negotiates Apple's
-extensions and resolves every entry of a folder by name. `test/mac/mac-client-check.sh`
-runs on a Mac against any instance and times the native client (`mount_smbfs`)
-listing a big folder with and without attributes, reads a file and does a write
-round trip; it fails if the big folder takes more than a few seconds. On the lab's
-LAN a 5,000-file folder lists in about 8 s both ways; Samba without `vfs_fruit`
-takes 10 s for the names and 48 s with attributes from the same Mac.
+The Go client cannot stand in for the operating systems' own clients: macOS's
+negotiates Apple's extensions and resolves every entry of a folder by name,
+Linux's compounds requests, Windows' caches. `test/rig` runs the server against
+all three (Windows `net use`, Linux `mount.cifs` and `smbclient`, macOS
+`mount_smbfs`) on a rig of six machines, two per OS, for every client OS x
+server OS pair, under some thirty conditions from a round trip to a 4.5 GiB
+sparse file, a 5,000-entry folder, killed transfers and 50 sessions at once;
+then every client against one server at the same time; then a timed barrage with
+every byte verified. The machines are defined as code beside the repo
+(`portable-smb-server local\provisioning`: Vagrant + Ansible, and tart for the
+macOS VM); without them the rig tests skip. See `test/rig/README.md`.
+
+```
+cd test; go test ./rig -run TestMatrix -v -timeout 3h
+```
+
+`test/mac/mac-client-check.sh` is the hand-run version of the macOS check: on a
+Mac against any instance, it times `mount_smbfs` listing a big folder with and
+without attributes, reads a file and does a write round trip. On the lab's LAN a
+5,000-file folder lists in about 8 s both ways; Samba without `vfs_fruit` takes
+10 s for the names and 48 s with attributes from the same Mac.
 
 ```
 test/mac/mac-client-check.sh HOST 1445 data user password many

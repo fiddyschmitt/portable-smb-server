@@ -111,3 +111,34 @@ func TestStatfs(t *testing.T) {
 		t.Errorf("statfs total=%d free=%d", total, free)
 	}
 }
+
+// TestRemoveWhileHandleOpen deletes a file while a handle to it is still open and then, WITHOUT
+// closing that handle, checks the name is already gone. This is what a client that caches file
+// handles (macOS smbfs) does: it deletes and immediately expects the entry gone, POSIX-style.
+// Classic Windows DeleteFile only marks the file delete-pending until the last handle closes, so
+// the name lingers and a Windows-hosted server disagrees with its Linux/macOS peers; Remove must
+// unlink immediately even with the handle open.
+func TestRemoveWhileHandleOpen(t *testing.T) {
+	f := newTestFS(t)
+	h, err := f.OpenFile("gone.txt", os.O_RDWR|os.O_CREATE, 0o666)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.Close()
+	if _, err := h.WriteAt([]byte("data"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Remove("gone.txt"); err != nil {
+		t.Fatalf("remove with an open handle: %v", err)
+	}
+	if _, err := f.Stat("gone.txt"); !os.IsNotExist(err) {
+		t.Errorf("stat right after remove (handle still open): %v, want not-exist", err)
+	}
+	if infos, err := f.ReadDir("."); err == nil {
+		for _, fi := range infos {
+			if fi.Name() == "gone.txt" {
+				t.Errorf("gone.txt still listed in the directory after remove")
+			}
+		}
+	}
+}

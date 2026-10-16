@@ -753,3 +753,150 @@ func TestShutdown(t *testing.T) {
 		t.Errorf("second Shutdown must be a no-op, got %v", err)
 	}
 }
+
+// TestQueryInfoRespectsOutputBufferLength checks that a QUERY_INFO reply never exceeds the
+// client's OutputBufferLength: when the full result does not fit, the server truncates it to the
+// buffer and returns STATUS_BUFFER_OVERFLOW. Returning more bytes than were asked for makes the
+// Windows redirector reject the response (ERROR_BAD_NET_RESP), which broke Go's os.File.Stat
+// (GetFileInformationByHandle) over a mount -- found by the rig stress test.
+func TestQueryInfoRespectsOutputBufferLength(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := testServer(t, dir, "", "")
+	c := newConn(s, nil)
+	respT := c.handleCommand(header{command: cmdTreeConnect}, treeConnectSeg("data"), &chainCtx{})
+	if respStatus(respT) != statusSuccess {
+		t.Fatal("tree connect failed")
+	}
+	treeID := le.Uint32(respT[36:40])
+	resp := c.handleCommand(header{command: cmdCreate, treeID: treeID}, createSeg("f.txt"), &chainCtx{})
+	if respStatus(resp) != statusSuccess {
+		t.Fatalf("open: status 0x%08x", respStatus(resp))
+	}
+	fileID := resp[smb2HeaderSize+64 : smb2HeaderSize+80]
+
+	// FileFsVolumeInformation is variable length: 18 fixed bytes plus the volume label.
+	query := func(outLen uint32) (uint32, []byte) {
+		qbody := make([]byte, 40)
+		qbody[2] = infoTypeFilesystem
+		qbody[3] = classFsVolume
+		le.PutUint32(qbody[4:8], outLen)
+		copy(qbody[24:40], fileID)
+		return c.handleQueryInfo(header{}, qbody)
+	}
+
+	// An ample buffer: SUCCESS and the whole structure.
+	status, full := query(4096)
+	if status != statusSuccess {
+		t.Fatalf("ample buffer: status 0x%08x, want SUCCESS", status)
+	}
+	fullLen := int(le.Uint32(full[4:8]))
+	if fullLen != len(full)-8 || fullLen < 20 {
+		t.Fatalf("ample reply OutputBufferLength %d, payload %d", fullLen, len(full)-8)
+	}
+
+	// A buffer two bytes short: BUFFER_OVERFLOW, and never more bytes than asked for.
+	tight := uint32(fullLen - 2)
+	status, part := query(tight)
+	if status != statusBufferOverflow {
+		t.Errorf("tight buffer: status 0x%08x, want BUFFER_OVERFLOW (0x80000005)", status)
+	}
+	if got := le.Uint32(part[4:8]); got != tight {
+		t.Errorf("overflow reply OutputBufferLength = %d, want clamped to %d", got, tight)
+	}
+	if len(part)-8 != int(tight) {
+		t.Errorf("overflow payload = %d bytes, want %d (never more than asked)", len(part)-8, tight)
+	}
+}
+
+// TestCloseReturnsPostQueryAttributes checks that a CLOSE whose request sets
+// SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB comes back with the flag set and the file's final size and
+// timestamp, while a plain close leaves the flag clear and the fields zero. The macOS smbfs kernel
+// asks on every close and logs "did not return close attributes" against a server that ignores it.
+func TestCloseReturnsPostQueryAttributes(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hello world"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := testServer(t, dir, "", "")
+	c := newConn(s, nil)
+	respT := c.handleCommand(header{command: cmdTreeConnect}, treeConnectSeg("data"), &chainCtx{})
+	if respStatus(respT) != statusSuccess {
+		t.Fatal("tree connect failed")
+	}
+	treeID := le.Uint32(respT[36:40])
+	open := func() []byte {
+		resp := c.handleCommand(header{command: cmdCreate, treeID: treeID}, createSeg("f.txt"), &chainCtx{})
+		if respStatus(resp) != statusSuccess {
+			t.Fatalf("open: status 0x%08x", respStatus(resp))
+		}
+		return append([]byte(nil), resp[smb2HeaderSize+64:smb2HeaderSize+80]...)
+	}
+
+	// With the flag: the response is 60 bytes, the flag is set, EndOfFile is the real size (11),
+	// and the write time is non-zero.
+	fileID := open()
+	cbody := make([]byte, 24)
+	le.PutUint16(cbody[0:2], 24)
+	le.PutUint16(cbody[2:4], closeFlagPostQueryAttrib)
+	copy(cbody[8:24], fileID)
+	status, resp := c.handleClose(header{}, cbody)
+	if status != statusSuccess {
+		t.Fatalf("close: status 0x%08x", status)
+	}
+	if len(resp) != 60 {
+		t.Fatalf("close response %d bytes, want 60", len(resp))
+	}
+	if flags := le.Uint16(resp[2:4]); flags&closeFlagPostQueryAttrib == 0 {
+		t.Errorf("Flags = 0x%04x, want POSTQUERY_ATTRIB set", flags)
+	}
+	if eof := le.Uint64(resp[48:56]); eof != 11 {
+		t.Errorf("EndOfFile = %d, want 11", eof)
+	}
+	if le.Uint64(resp[24:32]) == 0 {
+		t.Errorf("LastWriteTime is zero; want the file's mtime")
+	}
+
+	// Without the flag: flag clear and attribute fields zero.
+	fileID = open()
+	cbody = make([]byte, 24)
+	le.PutUint16(cbody[0:2], 24)
+	copy(cbody[8:24], fileID)
+	status, resp = c.handleClose(header{}, cbody)
+	if status != statusSuccess {
+		t.Fatalf("plain close: status 0x%08x", status)
+	}
+	if le.Uint16(resp[2:4]) != 0 {
+		t.Errorf("plain close Flags = 0x%04x, want 0", le.Uint16(resp[2:4]))
+	}
+	if le.Uint64(resp[48:56]) != 0 {
+		t.Errorf("plain close EndOfFile = %d, want 0 (no attrs requested)", le.Uint64(resp[48:56]))
+	}
+
+	// A delete-on-close handle, even with the flag set, gets the plain response: the file is going
+	// away, so there are no final attributes, and reporting them makes a caching client (macOS
+	// smbfs) believe the file it just deleted is still there. The file is gone from the backing.
+	segDel := createSeg("f.txt")
+	le.PutUint32(segDel[smb2HeaderSize+40:], optDeleteOnClose)
+	resp = c.handleCommand(header{command: cmdCreate, treeID: treeID}, segDel, &chainCtx{})
+	if respStatus(resp) != statusSuccess {
+		t.Fatalf("delete-on-close open: status 0x%08x", respStatus(resp))
+	}
+	fileID = append([]byte(nil), resp[smb2HeaderSize+64:smb2HeaderSize+80]...)
+	cbody = make([]byte, 24)
+	le.PutUint16(cbody[0:2], 24)
+	le.PutUint16(cbody[2:4], closeFlagPostQueryAttrib)
+	copy(cbody[8:24], fileID)
+	status, resp = c.handleClose(header{}, cbody)
+	if status != statusSuccess {
+		t.Fatalf("delete-on-close close: status 0x%08x", status)
+	}
+	if le.Uint16(resp[2:4]) != 0 {
+		t.Errorf("delete-on-close close Flags = 0x%04x, want 0 (no attrs for a vanishing file)", le.Uint16(resp[2:4]))
+	}
+	if _, err := os.Stat(filepath.Join(dir, "f.txt")); !os.IsNotExist(err) {
+		t.Errorf("f.txt still on the backing after delete-on-close: %v", err)
+	}
+}

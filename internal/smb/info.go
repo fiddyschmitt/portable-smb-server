@@ -92,6 +92,17 @@ func (c *conn) handleQueryInfo(h header, body []byte) (uint32, []byte) {
 	default:
 		return statusNotSupported, errorResponseBody()
 	}
+	// Respect the caller's OutputBufferLength. When the full result is larger (a variable-length
+	// class such as FileAllInformation or FileFsVolumeInformation whose name/label does not fit),
+	// return as much as fits and signal STATUS_BUFFER_OVERFLOW ([MS-SMB2] 3.3.5.20). Returning more
+	// bytes than were asked for makes the Windows redirector reject the whole response as invalid
+	// (ERROR_BAD_NET_RESP), which is what broke GetFileInformationByHandle for callers that pass a
+	// tight buffer (Go's os.File.Stat, among others).
+	outLen := int(le.Uint32(body[4:8]))
+	if len(info) > outLen {
+		info = info[:outLen]
+		return statusBufferOverflow, infoResponseBody(info)
+	}
 	return statusSuccess, infoResponseBody(info)
 }
 

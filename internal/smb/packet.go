@@ -75,6 +75,7 @@ const (
 const (
 	statusSuccess                uint32 = 0x00000000
 	statusPending                uint32 = 0x00000103
+	statusBufferOverflow         uint32 = 0x80000005
 	statusNoMoreFiles            uint32 = 0x80000006
 	statusMoreProcessingRequired uint32 = 0xC0000016
 	statusNoSuchFile             uint32 = 0xC000000F

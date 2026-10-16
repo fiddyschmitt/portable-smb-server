@@ -138,6 +138,7 @@ func TestReadOnlyShare(t *testing.T) {
 	qbody := make([]byte, 40)
 	qbody[2] = infoTypeFilesystem
 	qbody[3] = classFsAttribute
+	le.PutUint32(qbody[4:8], 4096) // OutputBufferLength, as a real client sends
 	copy(qbody[24:40], fileID)
 	status, qresp := c.handleQueryInfo(header{}, qbody)
 	if status != statusSuccess {

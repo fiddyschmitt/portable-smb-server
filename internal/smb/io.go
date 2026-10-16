@@ -90,7 +90,19 @@ func (c *conn) handleClose(h header, body []byte) (uint32, []byte) {
 	if len(body) < 24 {
 		return statusInvalidParameter, errorResponseBody()
 	}
+	flags := le.Uint16(body[2:4])
 	of := c.removeHandle(body[8:24])
+	// When the client sets SMB2_CLOSE_FLAG_POSTQUERY_ATTRIB it is asking us to return the file's
+	// final attributes in the CLOSE response ([MS-SMB2] 2.2.16), sparing it a separate query. The
+	// macOS client always asks, and logs "did not return close attributes" when a server ignores it.
+	// A delete-on-close is the exception: the file is about to cease to exist, so there are no final
+	// attributes to report -- returning them makes a caching client (macOS smbfs) believe the file
+	// it just deleted is still there. For those, answer with the plain response (flag clear).
+	var postAttrs []byte
+	if flags&closeFlagPostQueryAttrib != 0 && of != nil && !of.deleteOnClose {
+		attrs, size, mtime := of.attrs()
+		postAttrs = closeAttrs(attrs, size, mtime)
+	}
 	if of != nil {
 		if of.handle != nil {
 			// A close failure means a buffered write did not land, so report it
@@ -104,6 +116,9 @@ func (c *conn) handleClose(h header, body []byte) (uint32, []byte) {
 				return mapOSError(err), errorResponseBody()
 			}
 		}
+	}
+	if postAttrs != nil {
+		return statusSuccess, postAttrs
 	}
 	return statusSuccess, closeResponseBody()
 }

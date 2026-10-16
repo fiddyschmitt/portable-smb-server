@@ -348,12 +348,10 @@ func (c *conn) handleCommand(h header, seg []byte, ctx *chainCtx) []byte {
 	treeID := h.treeID
 	// Related compound commands inherit the session, tree and file handle of the
 	// preceding command rather than carrying their own.
-	if h.flags&flagsRelatedOps != 0 {
+	related := h.flags&flagsRelatedOps != 0
+	if related {
 		sessionID = ctx.sessionID
 		treeID = ctx.treeID
-		if ctx.fileID != nil {
-			substituteFileID(h.command, body, ctx.fileID)
-		}
 	} else {
 		ctx.sessionID = sessionID
 		ctx.treeID = treeID
@@ -371,10 +369,17 @@ func (c *conn) handleCommand(h header, seg []byte, ctx *chainCtx) []byte {
 	}
 
 	// Verify the signature of a signed request from an authenticated session so a
-	// man-in-the-middle can't tamper with it (we already sign our responses).
+	// man-in-the-middle can't tamper with it (we already sign our responses). This
+	// has to see the PDU exactly as the client signed it: a related command's
+	// placeholder FileId (all 0xFF) is only substituted below, afterwards. The
+	// Linux and macOS clients compound CREATE + QUERY_INFO + CLOSE and, when they
+	// sign, sign each with the placeholder in place.
 	if c.signKey != nil && h.flags&flagsSigned != 0 && !verifyMessage(c.signKey, c.dialect, seg) {
 		debugf("SMB: rejected cmd=%d with a bad signature on session %d", h.command, sessionID)
 		return buildResponse(h, h.command, statusAccessDenied, sessionID, treeID, credits, errorResponseBody())
+	}
+	if related && ctx.fileID != nil {
+		substituteFileID(h.command, body, ctx.fileID)
 	}
 
 	status := statusSuccess

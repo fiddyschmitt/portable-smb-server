@@ -387,6 +387,43 @@ func TestVerifySignature(t *testing.T) {
 	}
 }
 
+// TestVerifySignatureRelated checks that a signed related compound command (the
+// Linux and macOS clients chain CREATE + QUERY_INFO + CLOSE) is verified as the
+// client signed it, with the all-0xFF placeholder FileId still in place, and
+// only then given the preceding CREATE's handle. Verifying after the
+// substitution rejected every such command with ACCESS_DENIED, which made a
+// mount with signing required fail.
+func TestVerifySignatureRelated(t *testing.T) {
+	s := testServer(t, t.TempDir(), "", "")
+	c := newConn(s, nil)
+	c.signKey = make([]byte, 16)
+	c.dialect = dialect302
+	of := dirHandle(c, "") // the handle the CREATE before this command returned
+	ctx := &chainCtx{fileID: of.fileID[:]}
+
+	seg := make([]byte, smb2HeaderSize+24)
+	copy(seg[0:4], smb2Magic)
+	le.PutUint16(seg[4:6], smb2HeaderSize)                // header StructureSize
+	le.PutUint16(seg[12:14], cmdClose)                    // Command
+	le.PutUint32(seg[16:20], flagsSigned|flagsRelatedOps) // Flags: SIGNED | RELATED_OPERATIONS
+	le.PutUint16(seg[smb2HeaderSize:], 24)                // CLOSE StructureSize
+	for i := smb2HeaderSize + 8; i < smb2HeaderSize+24; i++ {
+		seg[i] = 0xFF // FileId: the "previous command's" placeholder
+	}
+	signMessage(c.signKey, c.dialect, seg)
+	h, ok := parseHeader(seg)
+	if !ok {
+		t.Fatal("parseHeader failed")
+	}
+	resp := c.handleCommand(h, seg, ctx)
+	if respStatus(resp) != statusSuccess {
+		t.Errorf("signed related CLOSE: status 0x%08x, want SUCCESS", respStatus(resp))
+	}
+	if _, open := c.handles[of.fileID]; open {
+		t.Error("the CLOSE did not reach the substituted handle")
+	}
+}
+
 // TestSMB3Signing checks the AES-CMAC signing path round-trips.
 func TestSMB3Signing(t *testing.T) {
 	key := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}

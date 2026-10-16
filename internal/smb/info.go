@@ -24,6 +24,7 @@ const (
 	classFileRename       byte = 0x0A
 	classFileDisposition  byte = 0x0D
 	classFileAll          byte = 0x12
+	classFileAllocation   byte = 0x13
 	classFileEndOfFile    byte = 0x14
 	classFileNetworkOpen  byte = 0x22
 	classFileAttributeTag byte = 0x23
@@ -278,6 +279,16 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 			if buf[0] != 0 && of.readOnlyFile() {
 				return statusAccessDenied, errorResponseBody()
 			}
+			// A directory with anything in it can't be marked for deletion:
+			// Windows answers STATUS_DIRECTORY_NOT_EMPTY here, and its client
+			// relies on it. Deferring the check to CLOSE, whose status the
+			// Windows client ignores, told it the directory was gone when it
+			// wasn't (the Linux and macOS clients notice the CLOSE status).
+			if buf[0] != 0 && of.isDir {
+				if entries, err := of.share.fs.ReadDir(of.path); err == nil && len(entries) > 0 {
+					return statusDirectoryNotEmpty, errorResponseBody()
+				}
+			}
 			of.deleteOnClose = buf[0] != 0
 		}
 	case classFileEndOfFile:
@@ -292,6 +303,19 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 				return mapOSError(err), errorResponseBody()
 			}
 		}
+	case classFileAllocation:
+		// FileAllocationInformation reserves space; it never changes the end of
+		// file, and a plain filesystem has no separate allocation to set, so this
+		// is a no-op. Windows' redirector sends it before FileEndOfFileInformation
+		// on a SetLength, and rejecting it (as the default case did) surfaced on
+		// the client as "the specified file length was too large for the file
+		// system" and failed every truncate from a Windows client.
+		if of.share.readOnly {
+			return statusMediaWriteProtected, errorResponseBody()
+		}
+		if of.readOnlyFile() {
+			return statusAccessDenied, errorResponseBody()
+		}
 	case classFileRename:
 		if of.share.readOnly {
 			return statusMediaWriteProtected, errorResponseBody()
@@ -305,8 +329,12 @@ func (c *conn) handleSetInfo(h header, body []byte) (uint32, []byte) {
 			if 20+int64(nameLen) <= int64(len(buf)) {
 				newPath := nameToPath(utf16leToString(buf[20 : 20+int(nameLen)]))
 				// Honour ReplaceIfExists: without it, refuse to clobber an existing
-				// target (Windows relies on this to prompt "replace or skip").
-				if !replaceIfExists {
+				// target (Windows relies on this to prompt "replace or skip"). A
+				// name that differs from the open's own only in case is not a
+				// collision: on a case-insensitive backing store (NTFS, APFS) the
+				// Stat finds the file itself, and a case-only rename is what the
+				// client wants.
+				if !replaceIfExists && !strings.EqualFold(newPath, of.path) {
 					if _, err := of.share.fs.Stat(newPath); err == nil {
 						return statusObjectNameCollision, errorResponseBody()
 					}

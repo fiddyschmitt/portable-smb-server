@@ -25,7 +25,7 @@ import (
 )
 
 // version is the semantic version of portable-smb-server. Update on release.
-const version = "0.4.1"
+const version = "0.4.2"
 
 // shareArg is one -folder or -vfs occurrence, optionally named by a following
 // -share.

@@ -34,6 +34,7 @@ portable-smb-server [flags]
   -vfs-readahead N  bytes fetched per /read from a -vfs provider when a client reads less (default 1048576; 0 disables)
   -log FILE       also write the log to this file
   -v              verbose (per-request) logging
+  -pprof ADDR     serve Go's runtime profiles (net/http/pprof) on this address for diagnostics, e.g. 127.0.0.1:6060
 ```
 
 Shares are passed as `-folder`/`-share` pairs; `-share` names the `-folder`
@@ -129,6 +130,23 @@ file at once:
 
 ```
 cd test; go test
+```
+
+A loopback benchmark measures the server's own throughput ceiling, signed and
+unsigned, isolated from the network:
+
+```
+cd test; PSMB_BENCH=1 go test -run TestLoopbackThroughput -v
+```
+
+`PSMB_BENCH_MB` sets the transfer size (default 256); `PSMB_BENCH_ADDR` points
+the benchmark at a server already running elsewhere instead of starting one on
+loopback. To see where the server spends its time, start it with `-pprof` and
+collect a profile while a client drives load:
+
+```
+portable-smb-server -pprof 127.0.0.1:6060 -folder .
+go tool pprof http://127.0.0.1:6060/debug/pprof/profile?seconds=20
 ```
 
 The Go client cannot stand in for the operating systems' own clients: macOS's

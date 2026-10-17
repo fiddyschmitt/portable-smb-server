@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/pprof"
 	"net/url"
 	"os"
 	"os/signal"
@@ -94,6 +96,7 @@ func main() {
 		vfsToken = flag.String("vfs-token", "", "sent as the X-Vfs-Token header on every request to a -vfs provider (a provider started with a token refuses requests without it)")
 		vfsAhead = flag.Int("vfs-readahead", httpvfs.DefaultReadAhead, "bytes fetched per /read from a -vfs provider when a client reads less, served to its following sequential reads (0 disables)")
 		withPar  = flag.Bool("exit-with-parent", false, "exit when the process that started this one is gone (for supervisors that may die abruptly)")
+		pprofAdr = flag.String("pprof", "", "serve Go's runtime profiles (net/http/pprof) on this address for diagnostics, e.g. 127.0.0.1:6060; off by default")
 	)
 	var args []shareArg
 	flag.Var(folderFlag{&args}, "folder", "folder to share; repeatable (default: current directory)")
@@ -127,6 +130,21 @@ func main() {
 		go func() {
 			if err := openapi.Serve(*oapiAddr); err != nil {
 				fatalf("openapi endpoint: %v", err)
+			}
+		}()
+	}
+	if *pprofAdr != "" {
+		// On its own mux, so the profiles never share a listener with anything else.
+		mux := http.NewServeMux()
+		mux.HandleFunc("/debug/pprof/", pprof.Index)
+		mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		log.Printf("pprof on http://%s/debug/pprof/", *pprofAdr)
+		go func() {
+			if err := http.ListenAndServe(*pprofAdr, mux); err != nil {
+				fatalf("pprof endpoint: %v", err)
 			}
 		}()
 	}

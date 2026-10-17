@@ -216,7 +216,9 @@ func hostOf(addr net.Addr) string {
 
 // conn is a single client TCP connection. SMB2 messages on a connection are
 // processed one at a time by serve, so the handle table is only accessed from
-// that goroutine (the mutex guards against the Shutdown path).
+// that goroutine (the mutex guards against the Shutdown path). Responses are
+// handed to a writer goroutine, in order, so serve can take up the next request
+// while the previous response is still going out on the wire.
 type conn struct {
 	server *Server
 	nc     net.Conn
@@ -246,14 +248,43 @@ func newConn(s *Server, nc net.Conn) *conn {
 	}
 }
 
+// outboundDepth is how many responses may wait for the wire per connection: enough
+// that the reader never stalls on a draining socket, bounded so a client that
+// stops reading can hold at most that many MiB-sized replies in memory.
+const outboundDepth = 8
+
 // serve reads and dispatches SMB2 messages until the connection closes.
+//
+// A client with credits sends its next requests without waiting for the previous
+// replies (a copy keeps several 1 MiB READs in flight), so sending a reply must not
+// hold up the handling of the request behind it: writing a MiB blocks until the
+// socket buffer has room, i.e. for as long as the wire takes. Replies therefore go
+// to a writer goroutine through an ordered channel, and the reader carries on with
+// the next request while the previous reply is still being transmitted.
 func (c *conn) serve() {
+	outbound := make(chan []byte, outboundDepth)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for msg := range outbound {
+			if err := writeMessage(c.nc, msg); err != nil {
+				// The peer is gone. Close the socket so the reader ends too, and
+				// keep draining so it never blocks on a full channel meanwhile.
+				_ = c.nc.Close()
+				for range outbound {
+				}
+				return
+			}
+		}
+	}()
 	defer func() {
 		// A panic in one request handler must not take down the whole server
 		// process; log it and drop just this connection.
 		if r := recover(); r != nil {
 			errorf("SMB: recovered from panic serving %s: %v", c.nc.RemoteAddr(), r)
 		}
+		close(outbound)
+		<-writerDone // every reply handed over has been written (or the peer is gone)
 		c.closeAllHandles()
 		_ = c.nc.Close()
 	}()
@@ -272,9 +303,7 @@ func (c *conn) serve() {
 			return
 		}
 		if out != nil {
-			if err := writeMessage(c.nc, out); err != nil {
-				return
-			}
+			outbound <- out
 		}
 	}
 }
@@ -447,6 +476,14 @@ func (c *conn) handleCommand(h header, seg []byte, ctx *chainCtx) []byte {
 func (c *conn) assembleResponse(pdus [][]byte) []byte {
 	if len(pdus) == 0 {
 		return nil
+	}
+	if len(pdus) == 1 {
+		// The common case, and the big one (a 1 MiB READ response): sign and send
+		// the PDU as built, with no copy into a message buffer.
+		if c.signKey != nil {
+			signMessage(c.signKey, c.dialect, pdus[0])
+		}
+		return pdus[0]
 	}
 	type span struct{ start, end int }
 	var out []byte

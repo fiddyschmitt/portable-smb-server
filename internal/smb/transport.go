@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 )
 
 // maxMessageSize is the largest SMB2 message we will accept over the Direct
@@ -36,21 +37,19 @@ func readMessage(r io.Reader) ([]byte, error) {
 }
 
 // writeMessage writes a single SMB2 message using the Direct TCP transport
-// framing described above.
+// framing described above. The frame and the message go out in one gathered
+// write (writev / WSASend with two buffers on a TCP connection): one system
+// call per response, and no 4-byte segment on the wire ahead of each payload,
+// which a Nagle-free socket would otherwise send on its own.
 func writeMessage(w io.Writer, msg []byte) error {
 	n := len(msg)
 	if n > maxMessageSize {
 		return fmt.Errorf("smb: outgoing message too large: %d bytes", n)
 	}
-	var hdr [4]byte
-	// hdr[0] stays zero; the length is a 24-bit big-endian value.
-	hdr[1] = byte(n >> 16)
-	hdr[2] = byte(n >> 8)
-	hdr[3] = byte(n)
-	if _, err := w.Write(hdr[:]); err != nil {
-		return err
-	}
-	_, err := w.Write(msg)
+	// The first byte stays zero; the length is a 24-bit big-endian value.
+	frame := []byte{0, byte(n >> 16), byte(n >> 8), byte(n)}
+	bufs := net.Buffers{frame, msg}
+	_, err := bufs.WriteTo(w)
 	return err
 }
 

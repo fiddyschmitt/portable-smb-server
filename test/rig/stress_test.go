@@ -298,6 +298,11 @@ func runLeg(t *testing.T, s *Settings, serverOS OS, seconds, workers, largeMB in
 				}
 			}
 			say("    %-14s%8d%8d%10.0f%10.0f%10.0f", op, count, errs, p50, p95, max)
+			if op == "randio" && count > 0 {
+				// 64 requests of 4 KiB per operation: the per-request round trip, as an
+				// application with a file open experiences it.
+				say("    %-14s%8s%8s%10.1f%10.1f%10.1f    (one 4 KiB request, = randio / 64)", "  per request", "", "", p50/64, p95/64, max/64)
+			}
 		}
 	}
 

@@ -27,11 +27,13 @@ func (c *conn) handleRead(h header, body []byte) (uint32, []byte) {
 		return statusInvalidParameter, errorResponseBody()
 	}
 	if length == 0 {
-		return statusSuccess, readResponseBody(nil)
+		return statusSuccess, readResponseBody(make([]byte, readRespFixed))
 	}
 
-	buf := make([]byte, length)
-	n, err := of.handle.ReadAt(buf, int64(offset))
+	// The file data is read straight into the response body, behind its fixed
+	// part, so a MiB is never copied from a read buffer into the reply.
+	resp := make([]byte, readRespFixed+int(length))
+	n, err := of.handle.ReadAt(resp[readRespFixed:], int64(offset))
 	if n <= 0 {
 		// A read entirely at or after EOF must be answered with
 		// STATUS_END_OF_FILE, which the client turns into io.EOF.
@@ -40,7 +42,7 @@ func (c *conn) handleRead(h header, body []byte) (uint32, []byte) {
 		}
 		return mapOSError(err), errorResponseBody()
 	}
-	return statusSuccess, readResponseBody(buf[:n])
+	return statusSuccess, readResponseBody(resp[:readRespFixed+n])
 }
 
 // handleWrite handles an SMB2 WRITE request ([MS-SMB2] 2.2.21).
@@ -123,16 +125,18 @@ func (c *conn) handleClose(h header, body []byte) (uint32, []byte) {
 	return statusSuccess, closeResponseBody()
 }
 
-// readResponseBody builds the READ response ([MS-SMB2] 2.2.20) carrying data.
-func readResponseBody(data []byte) []byte {
-	body := make([]byte, 16+len(data))
+// readRespFixed is the size of the READ response's fixed part, which the data follows.
+const readRespFixed = 16
+
+// readResponseBody fills in the READ response ([MS-SMB2] 2.2.20) around data
+// already in place: body is the fixed part followed by the data.
+func readResponseBody(body []byte) []byte {
 	le.PutUint16(body[0:2], 17) // StructureSize (fixed magic value)
 	// DataOffset is measured from the start of the SMB2 header. The data sits
 	// at body offset 16, i.e. wire offset 64+16 = 80. The client validates
 	// DataOffset >= 80 and then subtracts 64 to locate the data in the body.
-	body[2] = smb2HeaderSize + 16
-	le.PutUint32(body[4:8], uint32(len(data)))
-	copy(body[16:], data)
+	body[2] = smb2HeaderSize + readRespFixed
+	le.PutUint32(body[4:8], uint32(len(body)-readRespFixed))
 	return body
 }
 

@@ -68,6 +68,10 @@ func main() {
 		code = cmdSeed(os.Args[2:])
 	case "audit":
 		code = cmdAudit(os.Args[2:])
+	case "tcpserve":
+		code = cmdTCPServe(os.Args[2:])
+	case "tcpbench":
+		code = cmdTCPBench(os.Args[2:])
 	case "version":
 		fmt.Println("psmbstress v1")
 	default:
@@ -77,7 +81,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: psmbstress run|seed|audit|version [flags]   (see -h of each)")
+	fmt.Fprintln(os.Stderr, "usage: psmbstress run|seed|audit|tcpserve|tcpbench|version [flags]   (see -h of each)")
 	os.Exit(2)
 }
 

@@ -186,8 +186,12 @@ const verifyChunk = 1 << 20
 // verifyReader reads exactly n bytes from r and checks them against [off, off+n). With atEOF it
 // also requires r to end there, catching files that are longer than expected.
 func (c *content) verifyReader(r io.Reader, off, n int64, atEOF bool) (int64, error) {
-	got := make([]byte, verifyChunk)
-	want := make([]byte, verifyChunk)
+	chunk := int64(verifyChunk)
+	if n < chunk {
+		chunk = n // a 4 KiB read needn't allocate a MiB
+	}
+	got := make([]byte, chunk)
+	want := make([]byte, chunk)
 	var total int64
 	for n > 0 {
 		m := int64(len(got))

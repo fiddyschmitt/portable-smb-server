@@ -110,6 +110,7 @@ func (w *fsWorker) run(deadline time.Time) {
 		{"list", 8, w.opList},
 		{"corpus", 12, w.opCorpus},
 		{"cross", 9, w.opCross},
+		{"randio", 10, w.opRandIO},
 	}
 	if w.cfg.largeMaxMB <= 0 {
 		ops[2].weight = 0
@@ -453,6 +454,56 @@ func (w *fsWorker) opMutate() error {
 		return err
 	}
 	w.note(0, size)
+	if err := os.Remove(p); err != nil {
+		return err
+	}
+	return expectGone(p)
+}
+
+// randIOCount is how many 4 KiB requests one randio operation issues; the operation's latency
+// divided by it is the per-request round trip.
+const randIOCount = 64
+
+// opRandIO is what an application does to a file it keeps open: small reads and writes at random
+// offsets through one handle -- a database's pages, a document being saved, a zip's directory --
+// 4 KiB at a time, one write in four, every read verified. A sequential copy hides the per-request
+// round trip behind pipelining; this measures it.
+func (w *fsWorker) opRandIO() error {
+	const size = 4 << 20
+	rel := path.Join(w.rel, fmt.Sprintf("rand_%d.bin", w.next()))
+	c := newContent(w.cfg.seed, rel)
+	p := w.abs(rel)
+	if err := writeFile(p, c, size, 1<<20, false); err != nil {
+		return err
+	}
+	w.note(size, 0)
+	f, err := os.OpenFile(p, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	buf := make([]byte, blockSize)
+	const blocks = size / blockSize
+	for i := 0; i < randIOCount; i++ {
+		b := w.rng.Int63n(blocks)
+		off := b * blockSize
+		if i%4 == 3 {
+			c.bump(b, b+1)
+			c.fill(buf, off)
+			if _, err := f.WriteAt(buf, off); err != nil {
+				return err
+			}
+			w.note(blockSize, 0)
+			continue
+		}
+		if err := c.verifyAt(f, off, blockSize); err != nil {
+			return err
+		}
+		w.note(0, blockSize)
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
 	if err := os.Remove(p); err != nil {
 		return err
 	}

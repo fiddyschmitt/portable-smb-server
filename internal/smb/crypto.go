@@ -2,11 +2,13 @@ package smb
 
 import (
 	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rc4"
 	"crypto/sha256"
 	"strings"
+	"sync"
 
 	"portable-smb-server/internal/md4" // MD4 is required by the NTLM protocol
 )
@@ -169,63 +171,81 @@ func verifyMessage(signKey []byte, dialect uint16, msg []byte) bool {
 	return hmac.Equal(received[:], sig[:16])
 }
 
-// aesCMAC computes the AES-CMAC of msg (RFC 4493 / NIST SP 800-38B).
+// cmacChunk is how much of a message goes through the CBC encrypter per call. The chain state is
+// carried from one call to the next as its IV, so the scratch output never has to be the size of
+// the message.
+const cmacChunk = 64 << 10
+
+var cmacScratch = sync.Pool{New: func() any { b := make([]byte, cmacChunk); return &b }}
+
+// aesCMAC computes the AES-CMAC of msg (RFC 4493 / NIST SP 800-38B). CMAC is CBC-MAC with the
+// last block tweaked by a subkey, so every whole block before the last goes through the standard
+// library's CBC encrypter -- its tightest AES chain -- and only the last block is done by hand. A
+// block-at-a-time loop here, with its own XOR and a cipher call per block, was nearly half the
+// server's CPU under a Windows client, which signs every message, 1 MiB READ responses included.
 func aesCMAC(key, msg []byte) []byte {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return make([]byte, 16)
 	}
 	const bs = 16
-	subkey := make([]byte, bs)
-	block.Encrypt(subkey, subkey) // L = AES(K, 0)
-	k1 := gfMulX(subkey)
-	k2 := gfMulX(k1)
+	var l, k1, k2 [bs]byte
+	block.Encrypt(l[:], l[:]) // L = AES(K, 0)
+	gfMulX(&k1, &l)
+	gfMulX(&k2, &k1)
 
+	// The whole blocks before the last one (which may be partial, or the only one).
 	full := len(msg) / bs
 	rem := len(msg) % bs
 	if rem == 0 && full > 0 {
 		full--
 		rem = bs
 	}
-
-	x := make([]byte, bs)
-	tmp := make([]byte, bs)
-	for i := 0; i < full; i++ {
-		xorBytes(tmp, x, msg[i*bs:i*bs+bs])
-		block.Encrypt(x, tmp)
+	var x [bs]byte // the chain state: the last ciphertext block so far
+	if full > 0 {
+		scratchP := cmacScratch.Get().(*[]byte)
+		scratch := *scratchP
+		for off, end := 0, full*bs; off < end; {
+			n := end - off
+			if n > len(scratch) {
+				n = len(scratch)
+			}
+			cipher.NewCBCEncrypter(block, x[:]).CryptBlocks(scratch[:n], msg[off:off+n])
+			copy(x[:], scratch[n-bs:n])
+			off += n
+		}
+		cmacScratch.Put(scratchP)
 	}
 
-	last := make([]byte, bs)
+	var last [bs]byte
+	copy(last[:], msg[full*bs:])
 	if rem == bs {
-		copy(last, msg[full*bs:full*bs+bs])
-		xorBytes(last, last, k1)
+		xor16(&last, &k1)
 	} else {
-		copy(last, msg[full*bs:])
 		last[rem] = 0x80
-		xorBytes(last, last, k2)
+		xor16(&last, &k2)
 	}
-	xorBytes(tmp, x, last)
-	block.Encrypt(x, tmp)
-	return x
-}
-
-// gfMulX multiplies a 128-bit big-endian value by x in GF(2^128) (a left shift
-// with conditional reduction by the CMAC polynomial 0x87).
-func gfMulX(in []byte) []byte {
-	out := make([]byte, len(in))
-	var carry byte
-	for i := len(in) - 1; i >= 0; i-- {
-		out[i] = (in[i] << 1) | carry
-		carry = in[i] >> 7
-	}
-	if carry != 0 {
-		out[len(out)-1] ^= 0x87
-	}
+	xor16(&x, &last)
+	out := make([]byte, bs)
+	block.Encrypt(out, x[:])
 	return out
 }
 
-func xorBytes(dst, a, b []byte) {
+// gfMulX sets out to in times x in GF(2^128): a left shift with conditional reduction by the CMAC
+// polynomial 0x87, which is how RFC 4493 derives the subkeys.
+func gfMulX(out, in *[16]byte) {
+	var carry byte
+	for i := 15; i >= 0; i-- {
+		out[i] = in[i]<<1 | carry
+		carry = in[i] >> 7
+	}
+	if carry != 0 {
+		out[15] ^= 0x87
+	}
+}
+
+func xor16(dst, src *[16]byte) {
 	for i := range dst {
-		dst[i] = a[i] ^ b[i]
+		dst[i] ^= src[i]
 	}
 }
